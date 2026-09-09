@@ -1,0 +1,24 @@
+### Copie UMA requisição por vez para o Repeater. Destino: http://127.0.0.1:8765
+### Fluxo com falha intencional: sessão A consegue obter B200.
+GET /vulnerable/cards?cardId=A100 HTTP/1.1
+Host: 127.0.0.1:8765
+Authorization: Bearer demo-A
+
+### Fluxo protegido: B200 retorna 403.
+GET /protected/cards?cardId=A100 HTTP/1.1
+Host: 127.0.0.1:8765
+Authorization: Bearer demo-A
+
+### Campo dentro do header JSON. Mesmo controle de acesso do fluxo protegido.
+GET /charon/cards HTTP/1.1
+Host: 127.0.0.1:8765
+Authorization: Bearer demo-A
+x-charon-params: {"cardId":"A100","operation":"read"}
+
+### Validação de tipos. Não persiste nada no laboratório.
+POST /validate HTTP/1.1
+Host: 127.0.0.1:8765
+Authorization: Bearer demo-A
+Content-Type: application/json
+
+{"amount":10,"active":true,"name":"Teste"}

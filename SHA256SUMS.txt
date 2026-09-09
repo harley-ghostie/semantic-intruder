@@ -1,0 +1,2 @@
+bfcbdecaa764060599a31c430607b42cd3ee313ea8f17700d9963ac9c225febc  semantic-intruder-v2.jar
+648618d35bd82732f824edf2b2b9c027de2b16d56346f34ef439261427103cc1  semantic-intruder-v2-pacote.zip
