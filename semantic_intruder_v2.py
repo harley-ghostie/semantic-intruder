@@ -26,14 +26,22 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.3.0-python"
+VERSION = "0.3.3-loadfix"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
-MEANINGS = ("Identificador", "Texto", "Número", "Booleano")
+MEANINGS = ("Identificador", "Texto", "N\u00famero", "Booleano")
 IDENTIFIER, TEXT, NUMBER, BOOLEAN = MEANINGS
 JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
-WS = " \t\r\n"
+WS = " \\t\\r\\n"
+
+# Runtime detection kept deliberately conservative for old/new Burp releases
+# that still expose the legacy Extender API through Jython.
+try:
+    import java  # Jython only
+    IS_JYTHON = True
+except ImportError:
+    IS_JYTHON = False
 
 
 class ValidationError(ValueError):
@@ -51,7 +59,7 @@ def as_text(value):
 def json_text(value):
     if isinstance(value, Decimal):
         if not value.is_finite():
-            raise ValidationError("Número não finito.")
+            raise ValidationError("N\u00famero n\u00e3o finito.")
         return text_type(value)
     return as_text(json.dumps(value, ensure_ascii=True, allow_nan=False,
                               separators=(",", ":")))
@@ -69,7 +77,7 @@ def pointer_parts(pointer):
     if pointer == "":
         return []
     if not pointer.startswith("/") or re.search(r"~(?![01])", pointer):
-        raise ValidationError("Use JSON Pointer válido, como /meta/requestId.")
+        raise ValidationError("Use JSON Pointer v\u00e1lido, como /meta/requestId.")
     return [p.replace("~1", "/").replace("~0", "~")
             for p in pointer[1:].split("/")]
 
@@ -79,7 +87,7 @@ class JsonDocument(object):
     def __init__(self, source):
         self.source = as_text(source)
         if len(self.source) > MAX_REQUEST:
-            raise ValidationError("JSON maior que 1 milhão de caracteres.")
+            raise ValidationError("JSON maior que 1 milh\u00e3o de caracteres.")
         self.pos = 0
         self.spans = OrderedDict()
         self.values = OrderedDict()
@@ -87,7 +95,7 @@ class JsonDocument(object):
         self.root = self._value("", 0)
         self._space()
         if self.pos != len(self.source):
-            raise ValidationError("Conteúdo após o JSON.")
+            raise ValidationError("Conte\u00fado ap\u00f3s o JSON.")
 
     def _space(self):
         while self.pos < len(self.source) and self.source[self.pos] in WS:
@@ -97,7 +105,7 @@ class JsonDocument(object):
         try:
             value, end = self.decoder.raw_decode(self.source, self.pos)
         except ValueError:
-            raise ValidationError("String JSON inválida.")
+            raise ValidationError("String JSON inv\u00e1lida.")
         if not isinstance(value, text_type):
             raise ValidationError("Chave JSON deve ser texto.")
         self.pos = end
@@ -105,7 +113,7 @@ class JsonDocument(object):
 
     def _value(self, pointer, depth):
         if depth > 64:
-            raise ValidationError("JSON excede 64 níveis.")
+            raise ValidationError("JSON excede 64 n\u00edveis.")
         self._space()
         begin = self.pos
         if self.pos >= len(self.source):
@@ -126,10 +134,10 @@ class JsonDocument(object):
                     self._space()
                     if is_object:
                         if self.pos >= len(self.source) or self.source[self.pos] != '"':
-                            raise ValidationError("Chave JSON inválida.")
+                            raise ValidationError("Chave JSON inv\u00e1lida.")
                         key = self._string()
                         if key in value:
-                            raise ValidationError("Chaves JSON duplicadas não são editadas.")
+                            raise ValidationError("Chaves JSON duplicadas n\u00e3o s\u00e3o editadas.")
                         self._space()
                         if self.pos >= len(self.source) or self.source[self.pos] != ":":
                             raise ValidationError("Falta ':' no JSON.")
@@ -145,7 +153,7 @@ class JsonDocument(object):
                     if token == end_char:
                         break
                     if token != ",":
-                        raise ValidationError("Separador JSON inválido.")
+                        raise ValidationError("Separador JSON inv\u00e1lido.")
         else:
             matched = False
             for literal, result in (("true", True), ("false", False), ("null", None)):
@@ -157,7 +165,7 @@ class JsonDocument(object):
             if not matched:
                 number = JSON_NUMBER.match(self.source, self.pos)
                 if number is None:
-                    raise ValidationError("Valor JSON inválido.")
+                    raise ValidationError("Valor JSON inv\u00e1lido.")
                 token = number.group(0)
                 self.pos = number.end()
                 value = Decimal(token) if any(x in token for x in ".eE") else int(token)
@@ -171,7 +179,7 @@ class JsonDocument(object):
 
     def replace(self, pointer, value):
         if pointer not in self.spans:
-            raise ValidationError("Campo JSON não encontrado.")
+            raise ValidationError("Campo JSON n\u00e3o encontrado.")
         begin, end = self.spans[pointer]
         return self.source[:begin] + json_text(value) + self.source[end:]
 
@@ -193,7 +201,7 @@ def decode_component(value, path=False):
         char = value[i]
         if char == "%":
             if i + 2 >= len(value) or not re.match(r"^[0-9a-fA-F]{2}$", value[i + 1:i + 3]):
-                raise ValidationError("Percent-encoding inválido.")
+                raise ValidationError("Percent-encoding inv\u00e1lido.")
             out.append(int(value[i + 1:i + 3], 16))
             i += 3
         else:
@@ -205,7 +213,7 @@ def decode_component(value, path=False):
 def replace_pair(source, index, value):
     pairs = source.split("&")
     if index < 0 or index >= len(pairs):
-        raise ValidationError("Ocorrência do parâmetro não encontrada.")
+        raise ValidationError("Ocorr\u00eancia do par\u00e2metro n\u00e3o encontrada.")
     name = pairs[index].split("=", 1)[0]
     pairs[index] = name + "=" + encode_component(value)
     return "&".join(pairs)
@@ -215,27 +223,27 @@ class Request(object):
     def __init__(self, raw):
         self.raw = raw
         if len(raw) > MAX_REQUEST:
-            raise ValidationError("Requisição maior que 1 MB.")
+            raise ValidationError("Requisi\u00e7\u00e3o maior que 1 MB.")
         if b"\r\n\r\n" not in raw:
-            raise ValidationError("Requisição precisa de headers e separador CRLF.")
+            raise ValidationError("Requisi\u00e7\u00e3o precisa de headers e separador CRLF.")
         head, self.body = raw.split(b"\r\n\r\n", 1)
         self.lines = head.decode("iso-8859-1").split("\r\n")
         start = self.lines[0].split(" ")
         if len(start) != 3 or not start[1].startswith("/") or not re.match(r"^HTTP/(1\.[01]|2(?:\.0)?)$", start[2]):
-            raise ValidationError("Use uma requisição HTTP com caminho relativo, como GET /api HTTP/1.1.")
+            raise ValidationError("Use uma requisi\u00e7\u00e3o HTTP com caminho relativo, como GET /api HTTP/1.1.")
         self.method, self.path, self.version = start
         self.route, separator, self.query = self.path.partition("?")
         self.has_query = bool(separator)
         self.headers = []
         for index, line in enumerate(self.lines[1:], 1):
             if ":" not in line or line.startswith((" ", "\t")):
-                raise ValidationError("Header inválido ou dobrado em várias linhas.")
+                raise ValidationError("Header inv\u00e1lido ou dobrado em v\u00e1rias linhas.")
             name, value = line.split(":", 1)
             self.headers.append((name, value.strip(" \t"), index))
         if self.header("Transfer-Encoding"):
-            raise ValidationError("Normalize Transfer-Encoding da requisição no Repeater antes de importar.")
+            raise ValidationError("Normalize Transfer-Encoding da requisi\u00e7\u00e3o no Repeater antes de importar.")
         if len(self.header_entries("Content-Length")) > 1:
-            raise ValidationError("Content-Length repetido não suportado.")
+            raise ValidationError("Content-Length repetido n\u00e3o suportado.")
 
     def header_entries(self, name):
         return [h for h in self.headers if h[0].lower() == name.lower()]
@@ -248,11 +256,11 @@ class Request(object):
         lines = list(self.lines)
         if path is not None:
             if any(ord(c) < 32 or c in " #" for c in path):
-                raise ValidationError("Caminho HTTP inválido.")
+                raise ValidationError("Caminho HTTP inv\u00e1lido.")
             lines[0] = "%s %s %s" % (self.method, path, self.version)
         if header_index is not None:
             if any(ord(c) < 32 and c != "\t" for c in header_value):
-                raise ValidationError("Valor de header contém caractere de controle.")
+                raise ValidationError("Valor de header cont\u00e9m caractere de controle.")
             name, previous = lines[header_index].split(":", 1)
             spacing = previous[:len(previous) - len(previous.lstrip(" \t"))]
             lines[header_index] = name + ":" + spacing + header_value
@@ -274,7 +282,7 @@ class Target(object):
         self.typed = location in ("JSON", "HEADER_JSON")
 
     def label(self):
-        return "%s · %s%s" % (self.location, self.name, (" · " + self.pointer) if self.pointer else "")
+        return "%s | %s%s" % (self.location, self.name, (" | " + self.pointer) if self.pointer else "")
 
 
 EXCLUDED_HEADERS = set(("host", "content-length", "transfer-encoding", "connection",
@@ -286,13 +294,13 @@ def decode_header(value, codec):
     if codec == "json":
         return value.encode("iso-8859-1").decode("utf-8")
     if re.search(r"[^A-Za-z0-9+/=_-]", value) or len(value.rstrip("=")) % 4 == 1:
-        raise ValidationError("Base64 inválido.")
+        raise ValidationError("Base64 inv\u00e1lido.")
     if "=" in value.rstrip("=") or len(value) - len(value.rstrip("=")) > 2:
-        raise ValidationError("Padding Base64 inválido.")
+        raise ValidationError("Padding Base64 inv\u00e1lido.")
     if codec == "base64" and ("-" in value or "_" in value):
         raise ValidationError("Alfabeto Base64url.")
     if codec == "base64url" and ("+" in value or "/" in value):
-        raise ValidationError("Alfabeto Base64 padrão.")
+        raise ValidationError("Alfabeto Base64 padr\u00e3o.")
     padded = (value + "=" * (-len(value) % 4)).encode("ascii")
     data = base64.urlsafe_b64decode(padded) if codec == "base64url" else base64.b64decode(padded)
     return data.decode("utf-8")
@@ -314,7 +322,7 @@ def discover(request):
             try:
                 fields.append(Target("PATH", "segmento " + text_type(i), decode_component(segment, True), i))
             except (ValueError, UnicodeError):
-                notices.append("Segmento de path com encoding inválido ignorado.")
+                notices.append("Segmento de path com encoding inv\u00e1lido ignorado.")
 
     def pairs(source, location):
         for i, part in enumerate(source.split("&")):
@@ -323,32 +331,32 @@ def discover(request):
                 try:
                     fields.append(Target(location, decode_component(name) + " [%d]" % i, decode_component(value), i))
                 except (ValueError, UnicodeError):
-                    notices.append("Parâmetro com encoding inválido ignorado.")
+                    notices.append("Par\u00e2metro com encoding inv\u00e1lido ignorado.")
 
     pairs(request.query, "QUERY")
     ct = request.header("Content-Type").lower()
     charset = re.search(r"charset\s*=\s*\"?([^;\s\"]+)", ct)
     encoded = request.header("Content-Encoding").lower() not in ("", "identity")
     if encoded or (charset and charset.group(1) != "utf-8"):
-        notices.append("Campos do corpo indisponíveis para compressão ou charset diferente de UTF-8.")
+        notices.append("Campos do corpo indispon\u00edveis para compress\u00e3o ou charset diferente de UTF-8.")
     elif "application/json" in ct or "+json" in ct:
         try:
             doc = JsonDocument(request.body.decode("utf-8"))
             fields.extend(Target("JSON", "body", value, pointer=p) for p, value in doc.values.items())
         except (ValueError, UnicodeError) as exc:
-            notices.append("Corpo JSON não editável: " + as_text(exc))
+            notices.append("Corpo JSON n\u00e3o edit\u00e1vel: " + as_text(exc))
     elif "application/x-www-form-urlencoded" in ct:
         try:
             pairs(request.body.decode("utf-8"), "FORM")
         except UnicodeError:
-            notices.append("Form sem UTF-8 válido.")
+            notices.append("Form sem UTF-8 v\u00e1lido.")
     elif request.body:
-        notices.append("Formato do corpo não suportado; campos de path/query/headers continuam disponíveis.")
+        notices.append("Formato do corpo n\u00e3o suportado; campos de path/query/headers continuam dispon\u00edveis.")
     for name, value, index in request.headers:
         if name.lower() in EXCLUDED_HEADERS:
             continue
         if len(request.header_entries(name)) != 1:
-            notices.append("Header repetido não editado: " + name)
+            notices.append("Header repetido n\u00e3o editado: " + name)
             continue
         if name.lower() in ("x-charon", "x-charon-params"):
             for codec in ("json", "base64", "base64url"):
@@ -366,7 +374,7 @@ def discover(request):
         else:
             fields.append(Target("HEADER", name, value, index))
     if len(fields) > 2500:
-        raise ValidationError("Requisição excede 2.500 campos.")
+        raise ValidationError("Requisi\u00e7\u00e3o excede 2.500 campos.")
     return fields, list(OrderedDict.fromkeys(notices))
 
 
@@ -433,32 +441,32 @@ def plan(meaning, target, alternatives="", validation=True):
     if meaning == IDENTIFIER:
         lines = [v.strip() for v in alternatives.splitlines() if v.strip()]
         if len(lines) > MAX_TESTS:
-            raise ValidationError("Informe até 50 IDs por rodada.")
+            raise ValidationError("Informe at\u00e9 50 IDs por rodada.")
         for line in lines:
             if len(line) > 512:
                 raise ValidationError("Identificador excede 512 caracteres.")
             value = line
             if target.typed and isinstance(target.value, integer_types + (Decimal, float)) and not isinstance(target.value, bool):
                 if not re.match(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$", line):
-                    raise ValidationError("O campo JSON é numérico; informe IDs numéricos.")
+                    raise ValidationError("O campo JSON \u00e9 num\u00e9rico; informe IDs num\u00e9ricos.")
                 value = Decimal(line)
-            tests.append(TestCase("Autorização: massa alternativa", value, True))
+            tests.append(TestCase("Autoriza\u00e7\u00e3o: massa alternativa", value, True))
     if validation:
         tests.append(TestCase("Valor vazio", ""))
         if target.typed:
             tests.extend((TestCase("Nulo JSON", None), TestCase("Objeto no lugar do valor", {}), TestCase("Lista no lugar do valor", [])))
         if meaning == IDENTIFIER:
-            tests.append(TestCase("Formato inválido", "invalid-id!"))
+            tests.append(TestCase("Formato inv\u00e1lido", "invalid-id!"))
         elif meaning == TEXT:
-            tests.extend((TestCase("Espaço em branco", " "), TestCase("Texto Unicode", "ação_日本"), TestCase("Texto com 256 caracteres", "A" * 256)))
+            tests.extend((TestCase("Espa\u00e7o em branco", " "), TestCase("Texto Unicode", "a\u00e7\u00e3o_\u65e5\u672c"), TestCase("Texto com 256 caracteres", "A" * 256)))
             if target.typed:
-                tests.append(TestCase("Número no lugar do texto", 1))
+                tests.append(TestCase("N\u00famero no lugar do texto", 1))
         elif meaning == NUMBER:
             for value in ("-1", "0", "1.5", "2147483648"):
-                tests.append(TestCase("Limite/tipo numérico: " + value, Decimal(value) if target.typed else value))
-            tests.append(TestCase("Texto no lugar do número", "not-a-number"))
+                tests.append(TestCase("Limite/tipo num\u00e9rico: " + value, Decimal(value) if target.typed else value))
+            tests.append(TestCase("Texto no lugar do n\u00famero", "not-a-number"))
         elif meaning == BOOLEAN:
-            tests.extend((TestCase("Booleano verdadeiro", True if target.typed else "true"), TestCase("Booleano falso", False if target.typed else "false"), TestCase("Coerção numérica", 1 if target.typed else "1")))
+            tests.extend((TestCase("Booleano verdadeiro", True if target.typed else "true"), TestCase("Booleano falso", False if target.typed else "false"), TestCase("Coer\u00e7\u00e3o num\u00e9rica", 1 if target.typed else "1")))
             if target.typed:
                 tests.append(TestCase("Booleano como texto", "true"))
     seen, output = set(), []
@@ -468,9 +476,9 @@ def plan(meaning, target, alternatives="", validation=True):
             output.append(test)
             seen.add(key)
     if not output:
-        raise ValidationError("Nenhum teste gerado. Informe IDs alternativos ou habilite validação.")
+        raise ValidationError("Nenhum teste gerado. Informe IDs alternativos ou habilite valida\u00e7\u00e3o.")
     if len(output) > MAX_TESTS:
-        raise ValidationError("Máximo de 50 testes; reduza a massa alternativa.")
+        raise ValidationError("M\u00e1ximo de 50 testes; reduza a massa alternativa.")
     return output
 
 
@@ -479,7 +487,7 @@ def normalized(body, ignored):
     for pointer in ignored:
         parts = pointer_parts(pointer)
         if not parts:
-            raise ValidationError("A raiz inteira não pode ser ignorada.")
+            raise ValidationError("A raiz inteira n\u00e3o pode ser ignorada.")
         node = root
         try:
             for part in parts[:-1]:
@@ -518,7 +526,7 @@ def compare(base, response, authorization=False, ignored=()):
                    if left_paths.get(p, missing) != right_paths.get(p, missing)][:30]
     except (ValueError, UnicodeError):
         same = base.body == response.body
-        changes = [] if same else ["Corpo diferente; diff JSON indisponível"]
+        changes = [] if same else ["Corpo diferente; diff JSON indispon\u00edvel"]
     code = response.status
     if not 200 <= base.status < 300:
         conclusion = "Inconclusivo: baseline sem sucesso"
@@ -527,11 +535,11 @@ def compare(base, response, authorization=False, ignored=()):
     elif code in (401, 403):
         conclusion = "Acesso recusado; confirmar regra esperada"
     elif code == 404:
-        conclusion = "Não encontrado ou ocultado; inconclusivo"
+        conclusion = "N\u00e3o encontrado ou ocultado; inconclusivo"
     elif 300 <= code < 400:
         conclusion = "Redirecionamento; inconclusivo"
     elif authorization and 200 <= code < 300:
-        conclusion = "Revisar autorização: 2xx com ID alternativo (não confirma IDOR)"
+        conclusion = "Revisar autoriza\u00e7\u00e3o: 2xx com ID alternativo (n\u00e3o confirma IDOR)"
     elif code >= 400:
         conclusion = "Entrada recusada; confirmar contrato"
     elif 200 <= code < 300:
@@ -549,7 +557,7 @@ def dechunk(raw):
             raise ValidationError("Resposta chunked incompleta.")
         size_text = raw[pos:end].split(b";", 1)[0]
         if not re.match(b"^[0-9a-fA-F]+$", size_text):
-            raise ValidationError("Tamanho chunked inválido.")
+            raise ValidationError("Tamanho chunked inv\u00e1lido.")
         size = int(size_text, 16)
         pos = end + 2
         if size == 0:
@@ -558,7 +566,7 @@ def dechunk(raw):
             return b"".join(chunks)
         total += size
         if total > MAX_RESPONSE or pos + size + 2 > len(raw) or raw[pos + size:pos + size + 2] != b"\r\n":
-            raise ValidationError("Resposta chunked inválida ou maior que 2 MB.")
+            raise ValidationError("Resposta chunked inv\u00e1lida ou maior que 2 MB.")
         chunks.append(raw[pos:pos + size])
         pos += size + 2
 
@@ -567,14 +575,14 @@ class Response(object):
     def __init__(self, request, raw):
         self.request, self.raw = request, raw
         if raw is None or b"\r\n\r\n" not in raw:
-            raise ValidationError("Sem resposta HTTP completa; execução interrompida.")
+            raise ValidationError("Sem resposta HTTP completa; execu\u00e7\u00e3o interrompida.")
         if len(raw) > MAX_RESPONSE + 100000:
-            raise ValidationError("Resposta maior que o limite de memória.")
+            raise ValidationError("Resposta maior que o limite de mem\u00f3ria.")
         head, self.wire_body = raw.split(b"\r\n\r\n", 1)
         lines = head.decode("iso-8859-1").split("\r\n")
         status = re.match(r"^HTTP/[^ ]+ ([0-9]{3})(?: |$)", lines[0])
         if not status:
-            raise ValidationError("Status HTTP inválido.")
+            raise ValidationError("Status HTTP inv\u00e1lido.")
         self.status = int(status.group(1))
         headers = {}
         for line in lines[1:]:
@@ -588,7 +596,7 @@ class Response(object):
         if transfer == "chunked":
             self.body = dechunk(self.body)
         elif transfer not in ("", "identity"):
-            raise ValidationError("Transfer-Encoding da resposta não suportado.")
+            raise ValidationError("Transfer-Encoding da resposta n\u00e3o suportado.")
         encoding = headers.get("content-encoding", "")
         if encoding in ("gzip", "x-gzip") and self.body:
             try:
@@ -598,7 +606,7 @@ class Response(object):
                 finally:
                     stream.close()
             except (IOError, EOFError, ValueError):
-                raise ValidationError("Resposta gzip inválida.")
+                raise ValidationError("Resposta gzip inv\u00e1lida.")
             if len(self.body) > MAX_RESPONSE:
                 raise ValidationError("Resposta descomprimida maior que 2 MB.")
         # Other content encodings remain raw and are compared byte-for-byte.
@@ -610,7 +618,7 @@ class RunStopped(Exception):
 
 
 def monotonic():
-    if sys.platform.startswith("java"):
+    if IS_JYTHON:
         from java.lang import System
         return System.nanoTime() / 1000000000.0
     return time.monotonic()
@@ -619,12 +627,12 @@ def monotonic():
 class Runner(object):
     def __init__(self, transport, in_scope, stopped, emit, delay_ms=500):
         if not 0 <= delay_ms <= 10000:
-            raise ValidationError("Intervalo inválido.")
+            raise ValidationError("Intervalo inv\u00e1lido.")
         self.transport, self.in_scope, self.stopped, self.emit = transport, in_scope, stopped, emit
         self.delay = delay_ms / 1000.0
         self.last_finished = None
         self.rows = []
-        self.outcome = "Execução não iniciada."
+        self.outcome = "Execu\u00e7\u00e3o n\u00e3o iniciada."
         self.complete = False
 
     def _send(self, raw):
@@ -634,15 +642,15 @@ class Runner(object):
                 self.stopped.wait(min(remaining, 0.05))
                 remaining = self.delay - (monotonic() - self.last_finished)
         if self.stopped.is_set():
-            raise RunStopped("Execução parada; resultados parciais e sem baseline final completo.")
+            raise RunStopped("Execu\u00e7\u00e3o parada; resultados parciais e sem baseline final completo.")
         if not self.in_scope(raw):
-            raise ValidationError("Requisição fora do Target scope atual; execução interrompida.")
+            raise ValidationError("Requisi\u00e7\u00e3o fora do Target scope atual; execu\u00e7\u00e3o interrompida.")
         started = monotonic()
         response = self.transport(raw)
         finished = monotonic()
         self.last_finished = finished
         if not isinstance(response, Response):
-            raise ValidationError("Transporte não retornou resposta válida.")
+            raise ValidationError("Transporte n\u00e3o retornou resposta v\u00e1lida.")
         response.milliseconds = int((finished - started) * 1000)
         return response
 
@@ -659,46 +667,46 @@ class Runner(object):
     def run(self, original, tests, requests, ignored=()):
         if len(tests) != len(requests) or not 1 <= len(tests) <= MAX_TESTS:
             raise ValidationError("Plano vazio, inconsistente ou maior que 50 testes.")
-        self.outcome = "Execução em andamento; resultados provisórios."
+        self.outcome = "Execu\u00e7\u00e3o em andamento; resultados provis\u00f3rios."
         try:
             self.outcome = self._run(original, tests, requests, ignored)
         except RunStopped as exc:
             self.outcome = as_text(exc)
         except Exception:
-            self.outcome = "Execução interrompida por erro; resultados parciais e sem validação final."
+            self.outcome = "Execu\u00e7\u00e3o interrompida por erro; resultados parciais e sem valida\u00e7\u00e3o final."
             raise
         finally:
             if not self.complete:
                 for row in self.rows:
                     if row["payload"] or not row["test"].startswith("Baseline"):
-                        row["analysis"] = "INCONCLUSIVO (rodada incompleta/instável): " + row["analysis"]
+                        row["analysis"] = "INCONCLUSIVO (rodada incompleta/inst\u00e1vel): " + row["analysis"]
         return self.outcome
 
     def _run(self, original, tests, requests, ignored):
         base = self._send(original)
-        self._row("Baseline 1", base, "Referência original")
+        self._row("Baseline 1", base, "Refer\u00eancia original")
         if not 200 <= base.status < 300:
-            return "Interrompido: baseline sem sucesso (HTTP %d). Revise sessão/requisição." % base.status
+            return "Interrompido: baseline sem sucesso (HTTP %d). Revise sess\u00e3o/requisi\u00e7\u00e3o." % base.status
         second = self._send(original)
         check = compare(base, second, ignored=ignored)
         stable = base.status == second.status and check["same"]
-        self._row("Baseline 2", second, "Baseline estável" if stable else "Baseline instável", check["changes"])
+        self._row("Baseline 2", second, "Baseline est\u00e1vel" if stable else "Baseline inst\u00e1vel", check["changes"])
         if not stable:
-            return "Interrompido: baselines diferentes. Revise campos dinâmicos e sessão."
+            return "Interrompido: baselines diferentes. Revise campos din\u00e2micos e sess\u00e3o."
         for index, (test, raw) in enumerate(zip(tests, requests), 1):
             response = self._send(raw)
             analysis = compare(base, response, test.authorization, ignored)
             self._row("%d. %s" % (index, test.name), response,
-                      analysis["conclusion"] + (" · Corpo igual" if analysis["same"] else " · Corpo diferente"),
+                      analysis["conclusion"] + (" \u00b7 Corpo igual" if analysis["same"] else " \u00b7 Corpo diferente"),
                       analysis["changes"], test)
             if response.status in (401, 429):
-                return "Interrompido: HTTP %d; verifique sessão/limite. Sem baseline final." % response.status
+                return "Interrompido: HTTP %d; verifique sess\u00e3o/limite. Sem baseline final." % response.status
         final = self._send(original)
         check = compare(base, final, ignored=ignored)
         self.complete = base.status == final.status and check["same"]
-        self._row("Baseline final", final, "Referência estável" if self.complete else "Referência mudou; rodada inconclusiva", check["changes"])
-        return ("Execução concluída. Revise as evidências." if self.complete else
-                "Baseline final mudou: resultados inconclusivos; revise sessão e estado.")
+        self._row("Baseline final", final, "Refer\u00eancia est\u00e1vel" if self.complete else "Refer\u00eancia mudou; rodada inconclusiva", check["changes"])
+        return ("Execu\u00e7\u00e3o conclu\u00edda. Revise as evid\u00eancias." if self.complete else
+                "Baseline final mudou: resultados inconclusivos; revise sess\u00e3o e estado.")
 
 
 def export_report(runner):
@@ -707,12 +715,12 @@ def export_report(runner):
     return {"tool": "Semantic Intruder V2 Python " + VERSION,
             "exported_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "run_status": runner.outcome, "baseline_final_validated": runner.complete,
-            "notice": "Triagem; não confirma vulnerabilidades. Sem URLs, headers, corpos ou payloads.",
+            "notice": "Triagem; n\u00e3o confirma vulnerabilidades. Sem URLs, headers, corpos ou payloads.",
             "results": [dict((k, row[k]) for k in allowed) for row in runner.rows]}
 
 
 # The complete Burp/Swing integration is below. The core above imports no Java.
-if sys.platform.startswith("java"):
+if IS_JYTHON:
     from burp import (IBurpExtender, ITab, IContextMenuFactory,
                       IExtensionStateListener, IMessageEditorController)
     from java.lang import Runnable
@@ -797,6 +805,7 @@ if sys.platform.startswith("java"):
             self.callbacks = callbacks
             self.helpers = callbacks.getHelpers()
             self.running = False
+            self.loading_request = False
             self.unloaded = False
             self.stopped = threading.Event()
             self.original = None
@@ -807,6 +816,10 @@ if sys.platform.startswith("java"):
             self.rows = []
             self.controls = []
             callbacks.setExtensionName("Semantic Intruder V2 Python")
+            # This marker can only appear after Burp's own directory bootstrap succeeds.
+            # A <string>:1 -> PosixModule.chdir error before it must be fixed in the
+            # selected installation path; changing codecs here would run too late.
+            callbacks.printOutput("Semantic V2 Python %s: codigo iniciado; preparando interface." % VERSION)
             on_ui(self._build_ui, wait=True)
             callbacks.registerContextMenuFactory(self)
             callbacks.registerExtensionStateListener(self)
@@ -850,7 +863,7 @@ if sys.platform.startswith("java"):
         def _transport(self, raw, service):
             exchange = self.callbacks.makeHttpRequest(service, self._to_java(raw))
             if exchange is None:
-                raise ValidationError("Burp não retornou resposta.")
+                raise ValidationError("Burp n\u00e3o retornou resposta.")
             effective = self._to_bytes(exchange.getRequest()) or raw
             return Response(effective, self._to_bytes(exchange.getResponse()))
 
@@ -874,8 +887,8 @@ if sys.platform.startswith("java"):
             self.panel = JPanel(BorderLayout(8, 8))
             self.panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))
             header = JPanel(GridLayout(0, 1, 0, 4))
-            header.add(JLabel("SEMANTIC INTRUDER V2 · PYTHON · Testes de API por significado"))
-            self.source = JLabel("Repeater / HTTP history → botão direito → Extensions → Enviar para Semantic V2 Python")
+            header.add(JLabel("SEMANTIC INTRUDER V2 \u00b7 PYTHON \u00b7 Testes de API por significado"))
+            self.source = JLabel("Repeater / HTTP history \u2192 bot\u00e3o direito \u2192 Extensions \u2192 Enviar para Semantic V2 Python")
             header.add(self.source)
             self.panel.add(header, BorderLayout.NORTH)
             settings = JPanel()
@@ -883,32 +896,32 @@ if sys.platform.startswith("java"):
             self.target_box = JComboBox()
             self.meaning_box = JComboBox(list(MEANINGS))
             self._field(settings, "1. Campo a testar", self.target_box)
-            self._field(settings, "2. Significado (sugestão editável)", self.meaning_box)
+            self._field(settings, "2. Significado (sugest\u00e3o edit\u00e1vel)", self.meaning_box)
             self.alternatives = JTextArea(4, 28)
-            self.alternatives.setToolTipText("Um ID de teste por linha, sem aspas. A sessão original será mantida.")
+            self.alternatives.setToolTipText("Um ID de teste por linha, sem aspas. A sess\u00e3o original ser\u00e1 mantida.")
             self._field(settings, "3. IDs alternativos (para Identificador)", JScrollPane(self.alternatives))
-            self.validation = JCheckBox("Incluir validação de entrada e tipos", True)
+            self.validation = JCheckBox("Incluir valida\u00e7\u00e3o de entrada e tipos", True)
             settings.add(self.validation)
             self.ignored = JTextField()
-            self.ignored.setToolTipText("JSON Pointers separados por vírgula: /timestamp,/meta/requestId")
-            self._field(settings, "Ignorar campos dinâmicos (opcional)", self.ignored)
+            self.ignored.setToolTipText("JSON Pointers separados por v\u00edrgula: /timestamp,/meta/requestId")
+            self._field(settings, "Ignorar campos din\u00e2micos (opcional)", self.ignored)
             self.interval = JSpinner(SpinnerNumberModel(500, 100, 10000, 100))
-            self._field(settings, "Intervalo entre requisições (ms)", self.interval)
-            self.writes = JCheckBox("Repetir esta operação de escrita (POST/PUT etc.)", False)
+            self._field(settings, "Intervalo entre requisi\u00e7\u00f5es (ms)", self.interval)
+            self.writes = JCheckBox("Repetir esta opera\u00e7\u00e3o de escrita (POST/PUT etc.)", False)
             settings.add(self.writes)
-            info = JLabel("<html>Até 50 testes + 3 referências. Uma requisição por vez.<br>Exige Target scope do Burp. Não segue redirecionamentos.<br>Parar aguarda o envio atual; valem os timeouts do Burp.</html>")
+            info = JLabel("<html>At\u00e9 50 testes + 3 refer\u00eancias. Uma requisi\u00e7\u00e3o por vez.<br>Exige Target scope do Burp. N\u00e3o segue redirecionamentos.<br>Parar aguarda o envio atual; valem os timeouts do Burp.</html>")
             info.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0))
             settings.add(info)
-            self.generate_button = self._button("4. Gerar prévia", self._generate)
+            self.generate_button = self._button("4. Gerar pr\u00e9via", self._generate)
             settings.add(self.generate_button)
             self.preview = JTextArea(10, 30)
             self.preview.setEditable(False)
             self.preview.setLineWrap(True)
             self.preview.setWrapStyleWord(True)
-            self._field(settings, "Prévia / avisos", JScrollPane(self.preview), grow=True)
+            self._field(settings, "Pr\u00e9via / avisos", JScrollPane(self.preview), grow=True)
             for component in settings.getComponents():
                 component.setAlignmentX(0.0)
-            self.start = self._button("5. Executar prévia", self._execute)
+            self.start = self._button("5. Executar pr\u00e9via", self._execute)
             self.stop = self._button("Parar", self._stop)
             self.save = self._button("Exportar metadados JSON", self._export)
             self.clear = self._button("Limpar", self._clear)
@@ -918,8 +931,8 @@ if sys.platform.startswith("java"):
             actions = JPanel(FlowLayout(FlowLayout.LEFT))
             for button in (self.start, self.stop, self.save, self.clear):
                 actions.add(button)
-            self.run_state = JLabel("Nenhuma execução realizada.")
-            self.details = JLabel("Importe uma requisição para começar.")
+            self.run_state = JLabel("Nenhuma execu\u00e7\u00e3o realizada.")
+            self.details = JLabel("Importe uma requisi\u00e7\u00e3o para come\u00e7ar.")
             footer = JPanel(BorderLayout())
             messages = JPanel(GridLayout(0, 1))
             messages.add(self.run_state)
@@ -927,7 +940,7 @@ if sys.platform.startswith("java"):
             footer.add(actions, BorderLayout.NORTH)
             footer.add(messages, BorderLayout.SOUTH)
             self.panel.add(footer, BorderLayout.SOUTH)
-            self.model = ReadOnlyModel(["Teste", "Valor", "HTTP", "Bytes", "ms", "Análise"], 0)
+            self.model = ReadOnlyModel(["Teste", "Valor", "HTTP", "Bytes", "ms", "An\u00e1lise"], 0)
             self.table = JTable(self.model)
             self.table.setRowHeight(22)
             self.table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN)
@@ -976,6 +989,8 @@ if sys.platform.startswith("java"):
             self.start.setEnabled(False)
 
         def _target_changed(self):
+            if self.loading_request:
+                return
             index = self.target_box.getSelectedIndex()
             if 0 <= index < len(self.targets):
                 field = self.targets[index]
@@ -990,14 +1005,19 @@ if sys.platform.startswith("java"):
             self.original, self.service, self.runner = None, None, None
             self.rows, self.targets = [], []
             self.model.setRowCount(0)
-            self.target_box.removeAllItems()
+            was_loading = self.loading_request
+            self.loading_request = True
+            try:
+                self.target_box.removeAllItems()
+            finally:
+                self.loading_request = was_loading
             self.alternatives.setText("")
             self.ignored.setText("")
             self.writes.setSelected(False)
             self.preview.setText("")
             self.save.setEnabled(False)
-            self.source.setText("Envie uma requisição pelo menu de contexto do Burp.")
-            self.run_state.setText("Nenhuma execução realizada.")
+            self.source.setText("Envie uma requisi\u00e7\u00e3o pelo menu de contexto do Burp.")
+            self.run_state.setText("Nenhuma execu\u00e7\u00e3o realizada.")
             self.details.setText("Dados removidos da interface.")
             for controller in (self.current_controller, self.base_controller):
                 controller.service = controller.request_data = controller.response_data = None
@@ -1010,26 +1030,74 @@ if sys.platform.startswith("java"):
                 on_ui(lambda: self._load(message))
                 return
             if self.running:
-                self._error("Há uma rodada em andamento. Pare e aguarde antes de importar outra requisição.")
+                self._error("Ha uma rodada em andamento. Pare e aguarde antes de importar outra requisicao.")
                 return
             try:
-                request = Request(self._to_bytes(message.getRequest()))
-                fields, notices = discover(request)
+                if message is None or message.getRequest() is None:
+                    raise ValidationError("A selecao nao possui uma requisicao HTTP.")
+
                 service = message.getHttpService()
                 if service is None:
-                    raise ValidationError("A requisição não possui serviço HTTP de destino.")
-                self._clear()
-                self.original, self.service, self.targets = request, service, fields
-                for field in fields:
-                    self.target_box.addItem(field.label())
-                self.base_controller.service = service
-                self.base_controller.request_data = self._to_java(request.raw)
-                self.base_request_editor.setMessage(self.base_controller.request_data, True)
-                self.source.setText("%s · %s · %d campos" % (request.method, service.getHost(), len(fields)))
-                self.preview.setText("\n".join(notices))
-                self.details.setText("Abra Semantic V2 Py, escolha o campo e gere a prévia.")
+                    raise ValidationError("A requisicao nao possui servico HTTP de destino.")
+
+                raw = self._to_bytes(message.getRequest())
+                request = Request(raw)
+                fields, notices = discover(request)
+                java_request = self._to_java(request.raw)
+
+                if not fields:
+                    raise ValidationError(
+                        "Nenhum campo testavel foi encontrado. Use uma requisicao com "
+                        "path, query, JSON/form ou headers editaveis."
+                    )
+
+                source_text = "%s | %s | %d campos" % (
+                    request.method, as_text(service.getHost()), len(fields)
+                )
+
+                self.loading_request = True
+                try:
+                    self._clear()
+                    self.original = request
+                    self.service = service
+                    self.targets = fields
+
+                    for field in fields:
+                        self.target_box.addItem(as_text(field.label()))
+
+                    self.base_controller.service = service
+                    self.base_controller.request_data = java_request
+                    self.base_request_editor.setMessage(java_request, True)
+
+                    self.source.setText(source_text)
+                    self.preview.setText("\n".join(notices))
+                    self.details.setText(
+                        "Requisicao importada. Escolha o campo e gere a previa."
+                    )
+                finally:
+                    self.loading_request = False
+
+                if self.target_box.getItemCount() > 0:
+                    self.target_box.setSelectedIndex(0)
+                    field = self.targets[0]
+                    self.meaning_box.setSelectedItem(
+                        classify(field.name + field.pointer, field.value)
+                    )
+
+                self._invalidate()
+                self.callbacks.printOutput(
+                    "Semantic V2 Python %s: requisicao importada (%d campos)." %
+                    (VERSION, len(fields))
+                )
             except Exception as exc:
-                self._error(as_text(exc))
+                try:
+                    self.callbacks.printError(
+                        "Semantic V2 Python %s: falha ao importar requisicao: %s: %s" %
+                        (VERSION, type(exc).__name__, as_text(exc))
+                    )
+                except Exception:
+                    pass
+                self._error("Falha ao importar requisicao: " + as_text(exc))
 
         def _generate(self):
             if self.running:
@@ -1038,12 +1106,12 @@ if sys.platform.startswith("java"):
             try:
                 index = self.target_box.getSelectedIndex()
                 if self.original is None or not 0 <= index < len(self.targets):
-                    raise ValidationError("Importe uma requisição e escolha um campo.")
+                    raise ValidationError("Importe uma requisi\u00e7\u00e3o e escolha um campo.")
                 if not self._in_scope(self.original.raw, self.service):
-                    raise ValidationError("Inclua o endpoint em Target → Scope antes de gerar os testes.")
+                    raise ValidationError("Inclua o endpoint em Target \u2192 Scope antes de gerar os testes.")
                 writing = self.original.method.upper() not in ("GET", "HEAD", "OPTIONS")
                 if writing and not self.writes.isSelected():
-                    raise ValidationError("Método %s: habilite a opção de escrita para repetir esta operação." % self.original.method)
+                    raise ValidationError("M\u00e9todo %s: habilite a op\u00e7\u00e3o de escrita para repetir esta opera\u00e7\u00e3o." % self.original.method)
                 field = self.targets[index]
                 ignored = [p.strip() for p in as_text(self.ignored.getText()).split(",") if p.strip()]
                 for pointer in ignored:
@@ -1053,27 +1121,27 @@ if sys.platform.startswith("java"):
                 requests = [mutate(self.original, field, test.value) for test in tests]
                 for raw in requests:
                     if not self._in_scope(raw, self.service):
-                        raise ValidationError("Uma mutação sai do Target scope. Revise o campo, a prévia pretendida e o escopo do endpoint.")
+                        raise ValidationError("Uma muta\u00e7\u00e3o sai do Target scope. Revise o campo, a pr\u00e9via pretendida e o escopo do endpoint.")
                 lines = ["Campo: " + field.label(), "Original: " + json_text(field.value), ""]
-                lines.extend("%d. %s → %s" % (i, test.name, json_text(test.value)) for i, test in enumerate(tests, 1))
-                lines.extend(("", "Máximo de %d envios: 2 baselines + %d testes + 1 baseline final." % (len(tests) + 3, len(tests)),
-                              "IDs alternativos mantêm a sessão original. Um 2xx exige revisão de propriedade e regra de acesso."))
+                lines.extend("%d. %s \u2192 %s" % (i, test.name, json_text(test.value)) for i, test in enumerate(tests, 1))
+                lines.extend(("", "M\u00e1ximo de %d envios: 2 baselines + %d testes + 1 baseline final." % (len(tests) + 3, len(tests)),
+                              "IDs alternativos mant\u00eam a sess\u00e3o original. Um 2xx exige revis\u00e3o de propriedade e regra de acesso."))
                 if writing:
-                    lines.append("A operação de escrita será repetida também nos baselines.")
+                    lines.append("A opera\u00e7\u00e3o de escrita ser\u00e1 repetida tamb\u00e9m nos baselines.")
                 if field.location == "HEADER_JSON":
-                    lines.append("Codec detectado: %s. Assinaturas não são recalculadas." % field.codec)
+                    lines.append("Codec detectado: %s. Assinaturas n\u00e3o s\u00e3o recalculadas." % field.codec)
                 self.preview.setText("\n".join(lines))
                 self.preview.setCaretPosition(0)
                 self.prepared = (self.original.raw, self.service, tests, requests, ignored, int(self.interval.getValue()))
                 self.start.setEnabled(True)
-                self.details.setText("Prévia pronta. Executar enviará somente esta rodada.")
+                self.details.setText("Pr\u00e9via pronta. Executar enviar\u00e1 somente esta rodada.")
             except Exception as exc:
                 self._error(as_text(exc))
 
         def _stop(self):
             self.stopped.set()
             self.stop.setEnabled(False)
-            self.run_state.setText("Parando: aguarde a requisição atual. Valem os timeouts de conexão do Burp.")
+            self.run_state.setText("Parando: aguarde a requisi\u00e7\u00e3o atual. Valem os timeouts de conex\u00e3o do Burp.")
 
         def _execute(self):
             if self.running or self.prepared is None:
@@ -1094,7 +1162,7 @@ if sys.platform.startswith("java"):
             self.request_editor.setMessage(None, True)
             self.response_editor.setMessage(None, False)
             self.base_response_editor.setMessage(None, False)
-            self.run_state.setText("Execução em andamento; resultados provisórios até o baseline final.")
+            self.run_state.setText("Execu\u00e7\u00e3o em andamento; resultados provis\u00f3rios at\u00e9 o baseline final.")
             raw, service, tests, requests, ignored, delay = prepared
             runner = Runner(lambda data: self._transport(data, service),
                             lambda data: self._in_scope(data, service), self.stopped,
@@ -1106,7 +1174,7 @@ if sys.platform.startswith("java"):
                     runner.run(raw, tests, requests, ignored)
                 except Exception as exc:
                     # Do not log exception messages that may contain request URLs or credentials.
-                    runner.outcome = "Execução interrompida (%s). Revise sessão, escopo, formato e timeouts do Burp; resultados parciais." % type(exc).__name__
+                    runner.outcome = "Execu\u00e7\u00e3o interrompida (%s). Revise sess\u00e3o, escopo, formato e timeouts do Burp; resultados parciais." % type(exc).__name__
                     if isinstance(exc, ValidationError):
                         runner.outcome = as_text(exc)
                 finally:
@@ -1157,7 +1225,7 @@ if sys.platform.startswith("java"):
             self.current_controller.response_data = self._to_java(row["response"])
             self.request_editor.setMessage(self.current_controller.request_data, True)
             self.response_editor.setMessage(self.current_controller.response_data, False)
-            detail = row["analysis"] + (" · Diferenças: " + ", ".join(row["changed_json_pointers"]) if row["changed_json_pointers"] else "")
+            detail = row["analysis"] + (" \u00b7 Diferen\u00e7as: " + ", ".join(row["changed_json_pointers"]) if row["changed_json_pointers"] else "")
             self.details.setText(detail)
             self.details.setToolTipText(detail)
 
@@ -1170,11 +1238,11 @@ if sys.platform.startswith("java"):
             if chooser.showSaveDialog(self.panel) != JFileChooser.APPROVE_OPTION:
                 return
             destination = chooser.getSelectedFile()
-            if destination.exists() and JOptionPane.showConfirmDialog(self.panel, "Substituir o arquivo escolhido?", "Exportação", JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION:
+            if destination.exists() and JOptionPane.showConfirmDialog(self.panel, "Substituir o arquivo escolhido?", "Exporta\u00e7\u00e3o", JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION:
                 return
             try:
                 with io.open(as_text(destination.getAbsolutePath()), "w", encoding="utf-8") as handle:
                     handle.write(as_text(json.dumps(export_report(self.runner), ensure_ascii=False, indent=2)))
                 self.details.setText("Metadados exportados para " + as_text(destination.getName()))
             except Exception as exc:
-                self._error("Não foi possível exportar: " + as_text(exc))
+                self._error("N\u00e3o foi poss\u00edvel exportar: " + as_text(exc))
