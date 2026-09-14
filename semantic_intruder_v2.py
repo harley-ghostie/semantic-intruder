@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.3.3-loadfix"
+VERSION = "0.3.4-importfix"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -67,6 +67,15 @@ def json_text(value):
 
 def value_text(value):
     return value if isinstance(value, text_type) else json_text(value)
+
+
+def ui_text(value):
+    """Return an ASCII-safe text representation for old Jython/Swing bridges."""
+    value = as_text(value)
+    try:
+        return value.encode("ascii", "backslashreplace").decode("ascii")
+    except Exception:
+        return text_type(value)
 
 
 def pointer_escape(value):
@@ -1032,7 +1041,10 @@ if IS_JYTHON:
             if self.running:
                 self._error("Ha uma rodada em andamento. Pare e aguarde antes de importar outra requisicao.")
                 return
+
+            stage = "inicio"
             try:
+                stage = "ler mensagem"
                 if message is None or message.getRequest() is None:
                     raise ValidationError("A selecao nao possui uma requisicao HTTP.")
 
@@ -1040,64 +1052,107 @@ if IS_JYTHON:
                 if service is None:
                     raise ValidationError("A requisicao nao possui servico HTTP de destino.")
 
+                stage = "converter bytes"
                 raw = self._to_bytes(message.getRequest())
-                request = Request(raw)
-                fields, notices = discover(request)
-                java_request = self._to_java(request.raw)
 
+                stage = "parsear requisicao"
+                request = Request(raw)
+
+                stage = "descobrir campos"
+                fields, notices = discover(request)
                 if not fields:
                     raise ValidationError(
-                        "Nenhum campo testavel foi encontrado. Use uma requisicao com "
-                        "path, query, JSON/form ou headers editaveis."
+                        "Nenhum campo testavel foi encontrado. A requisicao foi lida, "
+                        "mas nao ha path/query/JSON/form/header editavel."
                     )
 
-                source_text = "%s | %s | %d campos" % (
-                    request.method, as_text(service.getHost()), len(fields)
-                )
+                stage = "converter request para Burp"
+                java_request = self._to_java(request.raw)
 
+                # From this point onward we commit the new request to the UI.
+                # Do not call _clear(): it resets labels/editors and can fire Swing
+                # selection events while the combo box is being populated.
+                stage = "preparar interface"
                 self.loading_request = True
                 try:
-                    self._clear()
+                    self.prepared = None
                     self.original = request
                     self.service = service
+                    self.runner = None
+                    self.rows = []
                     self.targets = fields
 
-                    for field in fields:
-                        self.target_box.addItem(as_text(field.label()))
+                    self.model.setRowCount(0)
+                    self.target_box.removeAllItems()
+                    self.alternatives.setText("")
+                    self.ignored.setText("")
+                    self.writes.setSelected(False)
+                    self.preview.setText("")
+                    self.save.setEnabled(False)
 
+                    stage = "preencher campos"
+                    for field in fields:
+                        self.target_box.addItem(ui_text(field.label()))
+
+                    stage = "carregar baseline visual"
                     self.base_controller.service = service
                     self.base_controller.request_data = java_request
+                    self.base_controller.response_data = None
                     self.base_request_editor.setMessage(java_request, True)
+                    self.base_response_editor.setMessage(None, False)
 
-                    self.source.setText(source_text)
-                    self.preview.setText("\n".join(notices))
-                    self.details.setText(
-                        "Requisicao importada. Escolha o campo e gere a previa."
-                    )
+                    self.current_controller.service = service
+                    self.current_controller.request_data = None
+                    self.current_controller.response_data = None
+                    self.request_editor.setMessage(None, True)
+                    self.response_editor.setMessage(None, False)
+
+                    stage = "atualizar textos"
+                    self.source.setText(ui_text("%s | %s | %d campos" % (
+                        request.method, service.getHost(), len(fields)
+                    )))
+                    self.preview.setText(ui_text("\n".join(notices)))
+                    self.run_state.setText("Nenhuma execucao realizada.")
+                    self.details.setText("Requisicao importada: %d campos encontrados." % len(fields))
                 finally:
                     self.loading_request = False
 
+                stage = "selecionar primeiro campo"
                 if self.target_box.getItemCount() > 0:
                     self.target_box.setSelectedIndex(0)
                     field = self.targets[0]
                     self.meaning_box.setSelectedItem(
-                        classify(field.name + field.pointer, field.value)
+                        ui_text(classify(field.name + field.pointer, field.value))
                     )
 
                 self._invalidate()
+                self.details.setText(
+                    "Requisicao importada com sucesso. Escolha o campo e gere a previa."
+                )
                 self.callbacks.printOutput(
-                    "Semantic V2 Python %s: requisicao importada (%d campos)." %
+                    "Semantic V2 Python %s: requisicao importada com sucesso (%d campos)." %
                     (VERSION, len(fields))
                 )
+
             except Exception as exc:
+                message_text = "Falha ao importar na etapa '%s': %s: %s" % (
+                    stage, type(exc).__name__, as_text(exc)
+                )
+                # Persist the failure in the tab itself so it remains visible even
+                # when modal dialogs are dismissed.
                 try:
-                    self.callbacks.printError(
-                        "Semantic V2 Python %s: falha ao importar requisicao: %s: %s" %
-                        (VERSION, type(exc).__name__, as_text(exc))
-                    )
+                    self.details.setText(ui_text(message_text))
+                    self.preview.setText(ui_text(message_text))
+                    self.run_state.setText("Falha na importacao da requisicao.")
                 except Exception:
                     pass
-                self._error("Falha ao importar requisicao: " + as_text(exc))
+                try:
+                    self.callbacks.printError("Semantic V2 Python %s: %s" % (
+                        VERSION, ui_text(message_text)
+                    ))
+                except Exception:
+                    pass
+                self._error(ui_text(message_text))
 
         def _generate(self):
             if self.running:
