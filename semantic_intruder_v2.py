@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.3.4-importfix"
+VERSION = "0.3.5-runstatefix"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -634,15 +634,28 @@ def monotonic():
 
 
 class Runner(object):
-    def __init__(self, transport, in_scope, stopped, emit, delay_ms=500):
+    def __init__(self, transport, in_scope, stopped, emit, delay_ms=500, progress=None):
         if not 0 <= delay_ms <= 10000:
-            raise ValidationError("Intervalo inv\u00e1lido.")
+            raise ValidationError("Intervalo invalido.")
         self.transport, self.in_scope, self.stopped, self.emit = transport, in_scope, stopped, emit
+        self.progress = progress or (lambda current, total, label: None)
         self.delay = delay_ms / 1000.0
         self.last_finished = None
         self.rows = []
-        self.outcome = "Execu\u00e7\u00e3o n\u00e3o iniciada."
+        self.outcome = "Execucao nao iniciada."
         self.complete = False
+        self.current_step = ""
+        self.current_index = 0
+        self.total_steps = 0
+
+    def _progress(self, current, total, label):
+        self.current_index = current
+        self.total_steps = total
+        self.current_step = label
+        try:
+            self.progress(current, total, label)
+        except Exception:
+            pass
 
     def _send(self, raw):
         if self.last_finished is not None:
@@ -692,30 +705,41 @@ class Runner(object):
         return self.outcome
 
     def _run(self, original, tests, requests, ignored):
+        total = len(tests) + 3
+        self.total_steps = total
+
+        self._progress(1, total, "Baseline 1")
         base = self._send(original)
-        self._row("Baseline 1", base, "Refer\u00eancia original")
+        self._row("Baseline 1", base, "Referencia original")
         if not 200 <= base.status < 300:
-            return "Interrompido: baseline sem sucesso (HTTP %d). Revise sess\u00e3o/requisi\u00e7\u00e3o." % base.status
+            return "Interrompido: baseline sem sucesso (HTTP %d). Revise sessao/requisicao." % base.status
+
+        self._progress(2, total, "Baseline 2")
         second = self._send(original)
         check = compare(base, second, ignored=ignored)
         stable = base.status == second.status and check["same"]
-        self._row("Baseline 2", second, "Baseline est\u00e1vel" if stable else "Baseline inst\u00e1vel", check["changes"])
+        self._row("Baseline 2", second, "Baseline estavel" if stable else "Baseline instavel", check["changes"])
         if not stable:
-            return "Interrompido: baselines diferentes. Revise campos din\u00e2micos e sess\u00e3o."
+            return "Interrompido: baselines diferentes. Revise campos dinamicos e sessao."
+
         for index, (test, raw) in enumerate(zip(tests, requests), 1):
+            step = index + 2
+            self._progress(step, total, "%d. %s" % (index, test.name))
             response = self._send(raw)
             analysis = compare(base, response, test.authorization, ignored)
             self._row("%d. %s" % (index, test.name), response,
-                      analysis["conclusion"] + (" \u00b7 Corpo igual" if analysis["same"] else " \u00b7 Corpo diferente"),
+                      analysis["conclusion"] + (" | Corpo igual" if analysis["same"] else " | Corpo diferente"),
                       analysis["changes"], test)
             if response.status in (401, 429):
-                return "Interrompido: HTTP %d; verifique sess\u00e3o/limite. Sem baseline final." % response.status
+                return "Interrompido: HTTP %d; verifique sessao/limite. Sem baseline final." % response.status
+
+        self._progress(total, total, "Baseline final")
         final = self._send(original)
         check = compare(base, final, ignored=ignored)
         self.complete = base.status == final.status and check["same"]
-        self._row("Baseline final", final, "Refer\u00eancia est\u00e1vel" if self.complete else "Refer\u00eancia mudou; rodada inconclusiva", check["changes"])
-        return ("Execu\u00e7\u00e3o conclu\u00edda. Revise as evid\u00eancias." if self.complete else
-                "Baseline final mudou: resultados inconclusivos; revise sess\u00e3o e estado.")
+        self._row("Baseline final", final, "Referencia estavel" if self.complete else "Referencia mudou; rodada inconclusiva", check["changes"])
+        return ("Execucao concluida. Revise as evidencias." if self.complete else
+                "Baseline final mudou: resultados inconclusivos; revise sessao e estado.")
 
 
 def export_report(runner):
@@ -918,7 +942,7 @@ if IS_JYTHON:
             self._field(settings, "Intervalo entre requisi\u00e7\u00f5es (ms)", self.interval)
             self.writes = JCheckBox("Repetir esta opera\u00e7\u00e3o de escrita (POST/PUT etc.)", False)
             settings.add(self.writes)
-            info = JLabel("<html>At\u00e9 50 testes + 3 refer\u00eancias. Uma requisi\u00e7\u00e3o por vez.<br>Exige Target scope do Burp. N\u00e3o segue redirecionamentos.<br>Parar aguarda o envio atual; valem os timeouts do Burp.</html>")
+            info = JLabel("Ate 50 testes + 3 referencias | 1 request por vez | exige Target Scope | Parar aguarda o request atual")
             info.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0))
             settings.add(info)
             self.generate_button = self._button("4. Gerar pr\u00e9via", self._generate)
@@ -940,11 +964,13 @@ if IS_JYTHON:
             actions = JPanel(FlowLayout(FlowLayout.LEFT))
             for button in (self.start, self.stop, self.save, self.clear):
                 actions.add(button)
-            self.run_state = JLabel("Nenhuma execu\u00e7\u00e3o realizada.")
-            self.details = JLabel("Importe uma requisi\u00e7\u00e3o para come\u00e7ar.")
+            self.run_state = JLabel("Nenhuma execucao realizada.")
+            self.progress_state = JLabel("Progresso: aguardando.")
+            self.details = JLabel("Importe uma requisicao para comecar.")
             footer = JPanel(BorderLayout())
             messages = JPanel(GridLayout(0, 1))
             messages.add(self.run_state)
+            messages.add(self.progress_state)
             messages.add(self.details)
             footer.add(actions, BorderLayout.NORTH)
             footer.add(messages, BorderLayout.SOUTH)
@@ -1026,7 +1052,8 @@ if IS_JYTHON:
             self.preview.setText("")
             self.save.setEnabled(False)
             self.source.setText("Envie uma requisi\u00e7\u00e3o pelo menu de contexto do Burp.")
-            self.run_state.setText("Nenhuma execu\u00e7\u00e3o realizada.")
+            self.run_state.setText("Nenhuma execucao realizada.")
+            self.progress_state.setText("Progresso: aguardando.")
             self.details.setText("Dados removidos da interface.")
             for controller in (self.current_controller, self.base_controller):
                 controller.service = controller.request_data = controller.response_data = None
@@ -1113,6 +1140,7 @@ if IS_JYTHON:
                     )))
                     self.preview.setText(ui_text("\n".join(notices)))
                     self.run_state.setText("Nenhuma execucao realizada.")
+                    self.progress_state.setText("Progresso: aguardando.")
                     self.details.setText("Requisicao importada: %d campos encontrados." % len(fields))
                 finally:
                     self.loading_request = False
@@ -1166,7 +1194,7 @@ if IS_JYTHON:
                     raise ValidationError("Inclua o endpoint em Target \u2192 Scope antes de gerar os testes.")
                 writing = self.original.method.upper() not in ("GET", "HEAD", "OPTIONS")
                 if writing and not self.writes.isSelected():
-                    raise ValidationError("M\u00e9todo %s: habilite a op\u00e7\u00e3o de escrita para repetir esta opera\u00e7\u00e3o." % self.original.method)
+                    raise ValidationError("Metodo %s: marque 'Repetir esta operacao de escrita' para confirmar os envios." % self.original.method)
                 field = self.targets[index]
                 ignored = [p.strip() for p in as_text(self.ignored.getText()).split(",") if p.strip()]
                 for pointer in ignored:
@@ -1182,7 +1210,8 @@ if IS_JYTHON:
                 lines.extend(("", "M\u00e1ximo de %d envios: 2 baselines + %d testes + 1 baseline final." % (len(tests) + 3, len(tests)),
                               "IDs alternativos mant\u00eam a sess\u00e3o original. Um 2xx exige revis\u00e3o de propriedade e regra de acesso."))
                 if writing:
-                    lines.append("A opera\u00e7\u00e3o de escrita ser\u00e1 repetida tamb\u00e9m nos baselines.")
+                    lines.append("ATENCAO: metodo de escrita confirmado. Baselines e testes repetirao a operacao.")
+                    lines.append("Parar impede novos envios, mas nao desfaz um POST/PUT/PATCH/DELETE ja enviado.")
                 if field.location == "HEADER_JSON":
                     lines.append("Codec detectado: %s. Assinaturas n\u00e3o s\u00e3o recalculadas." % field.codec)
                 self.preview.setText("\n".join(lines))
@@ -1194,9 +1223,17 @@ if IS_JYTHON:
                 self._error(as_text(exc))
 
         def _stop(self):
+            if not self.running:
+                return
             self.stopped.set()
             self.stop.setEnabled(False)
-            self.run_state.setText("Parando: aguarde a requisi\u00e7\u00e3o atual. Valem os timeouts de conex\u00e3o do Burp.")
+            self.run_state.setText("Cancelamento solicitado.")
+            self.progress_state.setText(
+                "Aguardando a requisicao HTTP atual terminar; o Burp controla o timeout da chamada."
+            )
+            self.details.setText(
+                "Nenhum novo teste sera enviado. Em POST/PUT/PATCH/DELETE, a requisicao atual pode ja ter produzido efeito."
+            )
 
         def _execute(self):
             if self.running or self.prepared is None:
@@ -1217,11 +1254,16 @@ if IS_JYTHON:
             self.request_editor.setMessage(None, True)
             self.response_editor.setMessage(None, False)
             self.base_response_editor.setMessage(None, False)
-            self.run_state.setText("Execu\u00e7\u00e3o em andamento; resultados provis\u00f3rios at\u00e9 o baseline final.")
+            self.run_state.setText("Execucao em andamento; resultados provisorios ate o baseline final.")
+            self.progress_state.setText("Progresso: iniciando rodada.")
             raw, service, tests, requests, ignored, delay = prepared
+            def progress(current, total, label):
+                on_ui(lambda: self._set_progress(current, total, label))
+
             runner = Runner(lambda data: self._transport(data, service),
                             lambda data: self._in_scope(data, service), self.stopped,
-                            lambda row: on_ui(lambda: self._append(row)), delay)
+                            lambda row: on_ui(lambda: self._append(row)), delay,
+                            progress=progress)
             self.runner = runner
 
             def work():
@@ -1238,6 +1280,16 @@ if IS_JYTHON:
             self.worker = threading.Thread(target=work, name="SemanticV2Python")
             self.worker.daemon = True
             self.worker.start()
+
+        def _set_progress(self, current, total, label):
+            if self.unloaded:
+                return
+            self.progress_state.setText(
+                "Progresso: %d/%d - %s" % (current, total, ui_text(label))
+            )
+            self.progress_state.setToolTipText(
+                "A chamada HTTP atual usa os timeouts configurados no Burp."
+            )
 
         def _append(self, row):
             if self.unloaded:
@@ -1260,12 +1312,34 @@ if IS_JYTHON:
             self.clear.setEnabled(True)
             self.stop.setEnabled(False)
             self.save.setEnabled(bool(runner.rows))
-            self._invalidate()
+
+            # Keep the exact generated preview available for an explicit re-run.
+            # Previously _invalidate() cleared self.prepared here, leaving
+            # "Executar previa" disabled after Stop/completion.
+            self.start.setEnabled(self.prepared is not None)
+
             for index, row in enumerate(self.rows):
                 self.model.setValueAt(row["analysis"], index, 5)
+
             self.run_state.setText(runner.outcome)
             self.run_state.setToolTipText(runner.outcome)
-            self.details.setText("Selecione uma linha para examinar request e response.")
+
+            if self.stopped.is_set():
+                self.progress_state.setText(
+                    "Rodada encerrada apos solicitacao de cancelamento. A previa continua disponivel para nova execucao."
+                )
+            elif runner.complete:
+                self.progress_state.setText(
+                    "Rodada concluida. A mesma previa pode ser executada novamente, se necessario."
+                )
+            else:
+                self.progress_state.setText(
+                    "Rodada encerrada. Revise o status antes de executar novamente."
+                )
+
+            self.details.setText(
+                "Selecione uma linha para examinar request/response. Alterar qualquer configuracao invalida esta previa."
+            )
 
         def _select_row(self):
             index = self.table.getSelectedRow()
