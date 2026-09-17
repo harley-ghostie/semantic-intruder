@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.3.7-intruderpreview"
+VERSION = "0.3.8-previewstatefix"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -1047,6 +1047,8 @@ if IS_JYTHON:
             JOptionPane.showMessageDialog(self.panel, as_text(message), "Semantic V2 Python", JOptionPane.INFORMATION_MESSAGE)
 
         def _invalidate(self):
+            if getattr(self, "generating", False):
+                return
             self.prepared = None
             self.start.setEnabled(False)
 
@@ -1217,6 +1219,7 @@ if IS_JYTHON:
             if self.running:
                 return
             self._invalidate()
+            self.generating = True
             try:
                 index = self.target_box.getSelectedIndex()
                 if self.original is None or not 0 <= index < len(self.targets):
@@ -1276,9 +1279,13 @@ if IS_JYTHON:
                 self.preview.setText("\n".join(lines))
                 self.preview.setCaretPosition(0)
                 self.prepared = (execution_raw, self.service, tests, requests, ignored, int(self.interval.getValue()))
-                self.start.setEnabled(True)
                 self.details.setText("Pr\u00e9via pronta. Executar enviar\u00e1 somente esta rodada.")
+                self.generating = False
+                self.start.setEnabled(True)
             except Exception as exc:
+                self.generating = False
+                self.prepared = None
+                self.start.setEnabled(False)
                 self._error(as_text(exc))
 
         def _stop(self):
@@ -1295,7 +1302,10 @@ if IS_JYTHON:
             )
 
         def _execute(self):
-            if self.running or self.prepared is None:
+            if self.running:
+                return
+            if self.prepared is None:
+                self._error("A previa nao esta mais valida. Gere a previa novamente antes de executar.")
                 return
             prepared = self.prepared
             self.running = True
