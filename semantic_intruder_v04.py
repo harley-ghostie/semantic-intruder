@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Semantic Intruder V2 for Burp Suite: Python 2.7/Jython, dependency-free.
+"""Semantic Intruder V2 - versão 0.4.3 for Burp Suite: Python 2.7/Jython, dependency-free.
 
 Load this file as a Python extension. The pure core also runs on CPython 3
 for tests; the Burp interface requires Jython and Burp's Extender API.
@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -821,9 +821,9 @@ def export_report(runner):
 if IS_JYTHON:
     from burp import (IBurpExtender, ITab, IContextMenuFactory,
                       IExtensionStateListener, IMessageEditorController)
-    from java.lang import Runnable
+    from java.lang import Runnable, Exception as JavaException, Integer, String
     from java.util import ArrayList
-    from java.awt import BorderLayout, Dimension, FlowLayout, GridLayout
+    from java.awt import BorderLayout, Dimension, FlowLayout, GridLayout, Font
     from java.awt.event import ActionListener
     from javax.swing import (JPanel, JLabel, JButton, JComboBox, JTextArea,
                              JTextField, JCheckBox, JScrollPane, JSplitPane,
@@ -880,6 +880,9 @@ if IS_JYTHON:
                 self.function()
 
     class ReadOnlyModel(DefaultTableModel):
+        def getColumnClass(self, column):
+            return Integer if column == 0 else String
+
         def isCellEditable(self, row, column):
             return False
 
@@ -897,6 +900,37 @@ if IS_JYTHON:
 
         def getResponse(self):
             return self.response_data
+
+    class TrafficViewer(object):
+        """Local read-only views; independent of Burp/custom editor extensions."""
+        def __init__(self, helpers):
+            self.helpers = helpers
+            self.value = None
+            self.panel = JTabbedPane()
+            self.raw_view = JTextArea()
+            self.hex_view = JTextArea()
+            for title, area in (("Raw", self.raw_view), ("Hex", self.hex_view)):
+                area.setEditable(False)
+                area.setFont(Font("Monospaced", Font.PLAIN, 12))
+                self.panel.addTab(title, JScrollPane(area))
+
+        def getComponent(self):
+            return self.panel
+
+        def setMessage(self, value, is_request):
+            self.value = value
+            text = as_text(self.helpers.bytesToString(value)) if value is not None else ""
+            self.raw_view.setText(text)
+            self.raw_view.setCaretPosition(0)
+            raw = bytearray(text.encode("iso-8859-1"))
+            # Limit rendered hex for responsiveness; raw traffic remains intact.
+            limit = min(len(raw), 65536)
+            lines = ["%08x  %s" % (i, " ".join("%02x" % n for n in raw[i:i+16]))
+                     for i in range(0, limit, 16)]
+            if len(raw) > limit:
+                lines.append("Hex limitado a 64 KiB; mensagem completa na aba Raw.")
+            self.hex_view.setText("\n".join(lines))
+            self.hex_view.setCaretPosition(0)
 
     class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IExtensionStateListener):
         def registerExtenderCallbacks(self, callbacks):
@@ -927,7 +961,7 @@ if IS_JYTHON:
             callbacks.printOutput("Semantic V2 Python %s carregado. Use o menu de contexto e abra a aba Semantic V2 Py." % VERSION)
 
         def getTabCaption(self):
-            return "Semantic V2 Py"
+            return "Semantic V2 Py " + VERSION
 
         def getUiComponent(self):
             return self.panel
@@ -942,7 +976,7 @@ if IS_JYTHON:
                 return None
             selected = messages[0]
             item = JMenuItem("Enviar para Semantic V2 Python")
-            item.addActionListener(Action(lambda: self._load(selected)))
+            item.addActionListener(Action(lambda: self._invoke(lambda: self._load(selected))))
             items = ArrayList()
             items.add(item)
             return items
@@ -969,8 +1003,22 @@ if IS_JYTHON:
 
         def _button(self, title, callback):
             button = JButton(title)
-            button.addActionListener(Action(callback))
+            button.addActionListener(Action(lambda: self._invoke(callback)))
             return button
+
+        def _report_failure(self, stage, exc):
+            # Exception messages can contain traffic/credentials; log only class + stage.
+            message = "Falha em %s (%s). Nenhum novo envio sera iniciado por este clique." % (stage, type(exc).__name__)
+            self.run_state.setText(message)
+            self.progress_state.setText("Estado: falha; controles liberados para nova tentativa.")
+            self.details.setText(message)
+            self.callbacks.printError("Semantic %s: %s" % (VERSION, message))
+
+        def _invoke(self, callback):
+            try:
+                callback()
+            except (Exception, JavaException) as exc:
+                self._report_failure(getattr(self, "start_stage", "acao da interface"), exc)
 
         def _field(self, container, title, component, grow=False):
             row = JPanel(BorderLayout(0, 4))
@@ -987,7 +1035,7 @@ if IS_JYTHON:
             self.panel = JPanel(BorderLayout(8, 8))
             self.panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))
             header = JPanel(GridLayout(0, 1, 0, 4))
-            header.add(JLabel("SEMANTIC INTRUDER V2  |  Positions  >  Payloads  >  Results"))
+            header.add(JLabel("SEMANTIC INTRUDER V2  " + VERSION + "  |  Positions  >  Payloads  >  Results"))
             self.source = JLabel("Repeater / HTTP history \u2192 bot\u00e3o direito \u2192 Extensions \u2192 Enviar para Semantic V2 Python")
             header.add(self.source)
             self.panel.add(header, BorderLayout.NORTH)
@@ -1065,10 +1113,10 @@ if IS_JYTHON:
             self.table.getSelectionModel().addListSelectionListener(Selected(self._select_row))
             self.current_controller = TrafficController()
             self.base_controller = TrafficController()
-            self.request_editor = self.callbacks.createMessageEditor(self.current_controller, False)
-            self.response_editor = self.callbacks.createMessageEditor(self.current_controller, False)
-            self.base_request_editor = self.callbacks.createMessageEditor(self.base_controller, False)
-            self.base_response_editor = self.callbacks.createMessageEditor(self.base_controller, False)
+            self.request_editor = TrafficViewer(self.helpers)
+            self.response_editor = TrafficViewer(self.helpers)
+            self.base_request_editor = TrafficViewer(self.helpers)
+            self.base_response_editor = TrafficViewer(self.helpers)
             evidence = JTabbedPane()
             evidence.addTab("Request selecionada", self.request_editor.getComponent())
             evidence.addTab("Response selecionada", self.response_editor.getComponent())
@@ -1266,7 +1314,7 @@ if IS_JYTHON:
                     (VERSION, len(fields))
                 )
 
-            except Exception as exc:
+            except (Exception, JavaException) as exc:
                 message_text = "Falha ao importar na etapa '%s': %s: %s" % (
                     stage, type(exc).__name__, as_text(exc)
                 )
@@ -1351,7 +1399,7 @@ if IS_JYTHON:
                 self.generating = False
                 self._sync_start()
                 self.repeat.setEnabled(False)
-            except Exception as exc:
+            except (Exception, JavaException) as exc:
                 self.generating = False
                 self.attack = None
                 self.preview_rows = []
@@ -1393,10 +1441,28 @@ if IS_JYTHON:
         def _execute(self):
             if self.running:
                 return
+            self.start_stage = "preparar inicio"
+            try:
+                self._begin_execution()
+            except (Exception, JavaException) as exc:
+                self.running = False
+                self.paused.clear()
+                for control in self.controls:
+                    control.setEnabled(True)
+                self.clear.setEnabled(True)
+                self.pause.setEnabled(False)
+                self.stop.setEnabled(False)
+                self._sync_start()
+                self._report_failure(self.start_stage, exc)
+
+        def _begin_execution(self):
+            if self.running:
+                return
             if self.attack is None or not self.attack.results:
                 self._generate()
                 if self.attack is None or not self.attack.results:
                     return
+            self.start_stage = "configuracao do ataque"
             config = self.attack.config
             raw = self.attack.execution_raw
             service = self.service
@@ -1423,6 +1489,7 @@ if IS_JYTHON:
                 self.model.setValueAt("PENDENTE", pi, 4)
                 for col in range(5, 12):
                     self.model.setValueAt("", pi, col)
+            self.start_stage = "limpar visualizadores"
             self.current_controller.request_data = self.current_controller.response_data = None
             self.base_controller.response_data = None
             self.request_editor.setMessage(None, True)
@@ -1442,7 +1509,7 @@ if IS_JYTHON:
             def work():
                 try:
                     runner.run(raw, tests, requests, ignored)
-                except Exception as exc:
+                except (Exception, JavaException) as exc:
                     # Do not log exception messages that may contain request URLs or credentials.
                     runner.outcome = "Execu\u00e7\u00e3o interrompida (%s). Revise sess\u00e3o, escopo, formato e timeouts do Burp; resultados parciais." % type(exc).__name__
                     if isinstance(exc, ValidationError):
@@ -1450,9 +1517,11 @@ if IS_JYTHON:
                 finally:
                     on_ui(lambda: self._finished(runner))
 
+            self.start_stage = "iniciar executor"
             self.worker = threading.Thread(target=work, name="SemanticV2Python")
             self.worker.daemon = True
             self.worker.start()
+            self.start_stage = "executor iniciado"
 
         def _set_progress(self, current, total, label):
             if self.unloaded:
@@ -1462,7 +1531,9 @@ if IS_JYTHON:
                 result = self.preview_rows[index]
                 result.state = "EXECUTANDO"
                 self.model.setValueAt("EXECUTANDO", index, 4)
-                self.table.setRowSelectionInterval(index, index)
+                view_index = self.table.convertRowIndexToView(index)
+                if view_index >= 0:
+                    self.table.setRowSelectionInterval(view_index, view_index)
                 self._select_row()
             self.progress_state.setText("Progresso: %d/%d - %s" %
                                         (current, total, ui_text(label)))
@@ -1590,5 +1661,5 @@ if IS_JYTHON:
                 with io.open(as_text(destination.getAbsolutePath()), "w", encoding="utf-8") as handle:
                     handle.write(as_text(json.dumps(export_report(self.runner), ensure_ascii=False, indent=2)))
                 self.details.setText("Metadados exportados para " + as_text(destination.getName()))
-            except Exception as exc:
+            except (Exception, JavaException) as exc:
                 self._error("N\u00e3o foi poss\u00edvel exportar: " + as_text(exc))
