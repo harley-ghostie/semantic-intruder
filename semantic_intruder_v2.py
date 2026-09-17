@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.3.5-runstatefix"
+VERSION = "0.3.7-intruderpreview"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -282,6 +282,20 @@ class Request(object):
             else:
                 lines.append("Content-Length: " + text_type(len(payload)))
         return ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1") + payload
+
+
+    def add_header(self, name, value):
+        name = as_text(name).strip()
+        value = as_text(value)
+        if not name or not re.match(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", name):
+            raise ValidationError("Nome de header invalido.")
+        if "\r" in value or "\n" in value:
+            raise ValidationError("Valor do novo header nao pode conter CR/LF.")
+        if self.header_entries(name):
+            raise ValidationError("O header '%s' ja existe. Selecione o header existente para testa-lo." % name)
+        lines = list(self.lines)
+        lines.append(name + ": " + value)
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1") + self.body
 
 
 class Target(object):
@@ -847,6 +861,7 @@ if IS_JYTHON:
             self.prepared = None
             self.runner = None
             self.rows = []
+            self.preview_rows = []
             self.controls = []
             callbacks.setExtensionName("Semantic Intruder V2 Python")
             # This marker can only appear after Burp's own directory bootstrap succeeds.
@@ -942,6 +957,14 @@ if IS_JYTHON:
             self._field(settings, "Intervalo entre requisi\u00e7\u00f5es (ms)", self.interval)
             self.writes = JCheckBox("Repetir esta opera\u00e7\u00e3o de escrita (POST/PUT etc.)", False)
             settings.add(self.writes)
+            self.add_header_enabled = JCheckBox("Adicionar novo cabecalho nesta rodada", False)
+            settings.add(self.add_header_enabled)
+            self.new_header_name = JTextField()
+            self.new_header_name.setToolTipText("Ex.: X-Forwarded-For. Nao substitui headers existentes.")
+            self._field(settings, "Novo cabecalho - nome", self.new_header_name)
+            self.new_header_value = JTextField()
+            self.new_header_value.setToolTipText("Valor literal. CR/LF nao sao permitidos.")
+            self._field(settings, "Novo cabecalho - valor", self.new_header_value)
             info = JLabel("Ate 50 testes + 3 referencias | 1 request por vez | exige Target Scope | Parar aguarda o request atual")
             info.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0))
             settings.add(info)
@@ -1006,11 +1029,15 @@ if IS_JYTHON:
             main.setDividerLocation(440)
             self.panel.add(main, BorderLayout.CENTER)
             self.controls = [self.target_box, self.meaning_box, self.alternatives, self.validation,
-                             self.ignored, self.interval, self.writes, self.generate_button]
+                             self.ignored, self.interval, self.writes, self.generate_button,
+                             self.add_header_enabled, self.new_header_name, self.new_header_value]
             self.target_box.addActionListener(Action(self._target_changed))
             self.meaning_box.addActionListener(Action(self._invalidate))
             self.validation.addActionListener(Action(self._invalidate))
             self.writes.addActionListener(Action(self._invalidate))
+            self.add_header_enabled.addActionListener(Action(self._invalidate))
+            self.new_header_name.getDocument().addDocumentListener(Changed(self._invalidate))
+            self.new_header_value.getDocument().addDocumentListener(Changed(self._invalidate))
             self.interval.addChangeListener(Changed(self._invalidate))
             self.alternatives.getDocument().addDocumentListener(Changed(self._invalidate))
             self.ignored.getDocument().addDocumentListener(Changed(self._invalidate))
@@ -1039,6 +1066,7 @@ if IS_JYTHON:
             self._invalidate()
             self.original, self.service, self.runner = None, None, None
             self.rows, self.targets = [], []
+            self.preview_rows = []
             self.model.setRowCount(0)
             was_loading = self.loading_request
             self.loading_request = True
@@ -1049,6 +1077,9 @@ if IS_JYTHON:
             self.alternatives.setText("")
             self.ignored.setText("")
             self.writes.setSelected(False)
+            self.add_header_enabled.setSelected(False)
+            self.new_header_name.setText("")
+            self.new_header_value.setText("")
             self.preview.setText("")
             self.save.setEnabled(False)
             self.source.setText("Envie uma requisi\u00e7\u00e3o pelo menu de contexto do Burp.")
@@ -1202,10 +1233,38 @@ if IS_JYTHON:
                 tests = plan(as_text(self.meaning_box.getSelectedItem()), field,
                              as_text(self.alternatives.getText()), self.validation.isSelected())
                 requests = [mutate(self.original, field, test.value) for test in tests]
+                add_header = self.add_header_enabled.isSelected()
+                header_name = as_text(self.new_header_name.getText()).strip()
+                header_value = as_text(self.new_header_value.getText())
+                execution_raw = self.original.raw
+                if add_header:
+                    execution_raw = self.original.add_header(header_name, header_value)
+                    requests = [Request(raw).add_header(header_name, header_value) for raw in requests]
                 for raw in requests:
                     if not self._in_scope(raw, self.service):
                         raise ValidationError("Uma muta\u00e7\u00e3o sai do Target scope. Revise o campo, a pr\u00e9via pretendida e o escopo do endpoint.")
+                planned = [
+                    {"test":"Baseline 1","payload":"original","request":execution_raw,"response":None,"analysis":"PENDENTE","changed_json_pointers":[]},
+                    {"test":"Baseline 2","payload":"original","request":execution_raw,"response":None,"analysis":"PENDENTE","changed_json_pointers":[]}
+                ]
+                for pi, (ptest, praw) in enumerate(zip(tests, requests), 1):
+                    planned.append({"test":"%d. %s" % (pi, ptest.name),
+                                    "payload":value_text(ptest.value),"request":praw,"response":None,
+                                    "analysis":"PENDENTE","changed_json_pointers":[]})
+                planned.append({"test":"Baseline final","payload":"original","request":execution_raw,
+                                "response":None,"analysis":"PENDENTE","changed_json_pointers":[]})
+                self.preview_rows = planned
+                self.model.setRowCount(0)
+                for prow in planned:
+                    self.model.addRow([prow["test"], prow["payload"], "", "", "", "PENDENTE"])
+                if planned:
+                    self.table.setRowSelectionInterval(0, 0)
+                    self._select_row()
+
                 lines = ["Campo: " + field.label(), "Original: " + json_text(field.value), ""]
+                if add_header:
+                    lines.extend(("Novo cabecalho: %s: %s" % (header_name, header_value),
+                                  "Aplicado aos baselines e a todas as mutacoes desta rodada.", ""))
                 lines.extend("%d. %s \u2192 %s" % (i, test.name, json_text(test.value)) for i, test in enumerate(tests, 1))
                 lines.extend(("", "M\u00e1ximo de %d envios: 2 baselines + %d testes + 1 baseline final." % (len(tests) + 3, len(tests)),
                               "IDs alternativos mant\u00eam a sess\u00e3o original. Um 2xx exige revis\u00e3o de propriedade e regra de acesso."))
@@ -1216,7 +1275,7 @@ if IS_JYTHON:
                     lines.append("Codec detectado: %s. Assinaturas n\u00e3o s\u00e3o recalculadas." % field.codec)
                 self.preview.setText("\n".join(lines))
                 self.preview.setCaretPosition(0)
-                self.prepared = (self.original.raw, self.service, tests, requests, ignored, int(self.interval.getValue()))
+                self.prepared = (execution_raw, self.service, tests, requests, ignored, int(self.interval.getValue()))
                 self.start.setEnabled(True)
                 self.details.setText("Pr\u00e9via pronta. Executar enviar\u00e1 somente esta rodada.")
             except Exception as exc:
@@ -1248,7 +1307,13 @@ if IS_JYTHON:
             for control in self.controls:
                 control.setEnabled(False)
             self.rows = []
-            self.model.setRowCount(0)
+            for pi, prow in enumerate(self.preview_rows):
+                prow["response"] = None
+                prow["analysis"] = "PENDENTE"
+                prow["changed_json_pointers"] = []
+                for col in (2, 3, 4):
+                    self.model.setValueAt("", pi, col)
+                self.model.setValueAt("PENDENTE", pi, 5)
             self.current_controller.request_data = self.current_controller.response_data = None
             self.base_controller.response_data = None
             self.request_editor.setMessage(None, True)
@@ -1284,6 +1349,12 @@ if IS_JYTHON:
         def _set_progress(self, current, total, label):
             if self.unloaded:
                 return
+            index = current - 1
+            if 0 <= index < len(self.preview_rows):
+                self.preview_rows[index]["analysis"] = "EXECUTANDO..."
+                self.model.setValueAt("EXECUTANDO...", index, 5)
+                self.table.setRowSelectionInterval(index, index)
+                self._select_row()
             self.progress_state.setText(
                 "Progresso: %d/%d - %s" % (current, total, ui_text(label))
             )
@@ -1295,13 +1366,26 @@ if IS_JYTHON:
             if self.unloaded:
                 return
             self.rows.append(row)
-            self.model.addRow([row["test"], row["payload"], row["http_status"], row["response_bytes"], row["elapsed_ms"], row["analysis"]])
-            if len(self.rows) == 1:
+            index = len(self.rows) - 1
+            if index >= len(self.preview_rows):
+                return
+            prow = self.preview_rows[index]
+            prow.update(row)
+            self.model.setValueAt(row["test"], index, 0)
+            self.model.setValueAt(row["payload"], index, 1)
+            self.model.setValueAt(row["http_status"], index, 2)
+            self.model.setValueAt(row["response_bytes"], index, 3)
+            self.model.setValueAt(row["elapsed_ms"], index, 4)
+            self.model.setValueAt(row["analysis"], index, 5)
+            if index == 0:
                 self.base_controller.request_data = self._to_java(row["request"])
                 self.base_controller.response_data = self._to_java(row["response"])
                 self.base_request_editor.setMessage(self.base_controller.request_data, True)
                 self.base_response_editor.setMessage(self.base_controller.response_data, False)
-            self.details.setText("%d respostas recebidas." % len(self.rows))
+            selected = self.table.getSelectedRow()
+            if selected >= 0 and self.table.convertRowIndexToModel(selected) == index:
+                self._select_row()
+            self.details.setText("%d de %d respostas recebidas." % (len(self.rows), len(self.preview_rows)))
 
         def _finished(self, runner):
             self.running = False
@@ -1320,6 +1404,10 @@ if IS_JYTHON:
 
             for index, row in enumerate(self.rows):
                 self.model.setValueAt(row["analysis"], index, 5)
+            for index in range(len(self.rows), len(self.preview_rows)):
+                state = "CANCELADO / NAO EXECUTADO" if self.stopped.is_set() else "NAO EXECUTADO"
+                self.preview_rows[index]["analysis"] = state
+                self.model.setValueAt(state, index, 5)
 
             self.run_state.setText(runner.outcome)
             self.run_state.setToolTipText(runner.outcome)
@@ -1346,15 +1434,20 @@ if IS_JYTHON:
             if index < 0:
                 return
             index = self.table.convertRowIndexToModel(index)
-            if index >= len(self.rows):
+            if index >= len(self.preview_rows):
                 return
-            row = self.rows[index]
+            row = self.preview_rows[index]
             self.current_controller.service = self.service
-            self.current_controller.request_data = self._to_java(row["request"])
-            self.current_controller.response_data = self._to_java(row["response"])
+            self.current_controller.request_data = self._to_java(row.get("request"))
+            self.current_controller.response_data = self._to_java(row.get("response"))
             self.request_editor.setMessage(self.current_controller.request_data, True)
             self.response_editor.setMessage(self.current_controller.response_data, False)
-            detail = row["analysis"] + (" \u00b7 Diferen\u00e7as: " + ", ".join(row["changed_json_pointers"]) if row["changed_json_pointers"] else "")
+            detail = row.get("analysis", "PENDENTE")
+            changes = row.get("changed_json_pointers", [])
+            if changes:
+                detail += " | Diferencas: " + ", ".join(changes)
+            if row.get("response") is None:
+                detail += " | Request pronta; response ainda nao recebida."
             self.details.setText(detail)
             self.details.setToolTipText(detail)
 
