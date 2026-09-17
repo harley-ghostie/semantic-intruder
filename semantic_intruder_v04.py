@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -988,7 +988,7 @@ if IS_JYTHON:
             self.panel = JPanel(BorderLayout(8, 8))
             self.panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10))
             header = JPanel(GridLayout(0, 1, 0, 4))
-            header.add(JLabel("SEMANTIC INTRUDER V2 \u00b7 PYTHON \u00b7 Testes de API por significado"))
+            header.add(JLabel("SEMANTIC INTRUDER V2  |  Positions  >  Payloads  >  Results"))
             self.source = JLabel("Repeater / HTTP history \u2192 bot\u00e3o direito \u2192 Extensions \u2192 Enviar para Semantic V2 Python")
             header.add(self.source)
             self.panel.add(header, BorderLayout.NORTH)
@@ -996,18 +996,18 @@ if IS_JYTHON:
             settings.setLayout(BoxLayout(settings, BoxLayout.Y_AXIS))
             self.target_box = JComboBox()
             self.meaning_box = JComboBox(list(MEANINGS))
-            self._field(settings, "1. Campo a testar", self.target_box)
-            self._field(settings, "2. Significado (sugest\u00e3o edit\u00e1vel)", self.meaning_box)
+            self._field(settings, "Positions - ponto de insercao", self.target_box)
+            self._field(settings, "Semantic type", self.meaning_box)
             self.alternatives = JTextArea(4, 28)
             self.alternatives.setToolTipText("Um ID de teste por linha, sem aspas. A sess\u00e3o original ser\u00e1 mantida.")
-            self._field(settings, "3. IDs alternativos (para Identificador)", JScrollPane(self.alternatives))
+            self._field(settings, "Payloads / massa autorizada (1 por linha)", JScrollPane(self.alternatives))
             self.validation = JCheckBox("Incluir valida\u00e7\u00e3o de entrada e tipos", True)
             settings.add(self.validation)
             self.ignored = JTextField()
             self.ignored.setToolTipText("JSON Pointers separados por v\u00edrgula: /timestamp,/meta/requestId")
-            self._field(settings, "Ignorar campos din\u00e2micos (opcional)", self.ignored)
+            self._field(settings, "Options - JSON pointers ignorados", self.ignored)
             self.interval = JSpinner(SpinnerNumberModel(500, 100, 10000, 100))
-            self._field(settings, "Intervalo entre requisi\u00e7\u00f5es (ms)", self.interval)
+            self._field(settings, "Options - intervalo (ms)", self.interval)
             self.writes = JCheckBox("Repetir esta opera\u00e7\u00e3o de escrita (POST/PUT etc.)", False)
             settings.add(self.writes)
             self.add_header_enabled = JCheckBox("Adicionar novo cabecalho nesta rodada", False)
@@ -1023,27 +1023,29 @@ if IS_JYTHON:
             settings.add(info)
             self.generate_button = self._button("4. Preparar testes", self._generate)
             settings.add(self.generate_button)
-            self.preview = JTextArea(10, 30)
+            self.preview = JTextArea(6, 28)
             self.preview.setEditable(False)
             self.preview.setLineWrap(True)
             self.preview.setWrapStyleWord(True)
-            self._field(settings, "Pr\u00e9via / avisos", JScrollPane(self.preview), grow=True)
+            self._field(settings, "Attack summary / avisos", JScrollPane(self.preview), grow=True)
             for component in settings.getComponents():
                 component.setAlignmentX(0.0)
             self.start = self._button("5. Iniciar", self._execute)
             self.pause = self._button("Pausar", self._pause)
             self.stop = self._button("Parar", self._stop)
+            self.repeat = self._button("Repetir", self._repeat)
             self.save = self._button("Exportar metadados JSON", self._export)
             self.clear = self._button("Limpar", self._clear)
             self.start.setEnabled(False)
             self.pause.setEnabled(False)
             self.stop.setEnabled(False)
+            self.repeat.setEnabled(False)
             self.save.setEnabled(False)
             actions = JPanel(FlowLayout(FlowLayout.LEFT))
-            for button in (self.start, self.pause, self.stop, self.save, self.clear):
+            for button in (self.start, self.pause, self.stop, self.repeat, self.save, self.clear):
                 actions.add(button)
-            self.run_state = JLabel("Nenhuma execucao realizada.")
-            self.progress_state = JLabel("Progresso: aguardando.")
+            self.run_state = JLabel("Ataque nao iniciado.")
+            self.progress_state = JLabel("Estado: aguardando preparacao.")
             self.details = JLabel("Importe uma requisicao para comecar.")
             footer = JPanel(BorderLayout())
             messages = JPanel(GridLayout(0, 1))
@@ -1076,12 +1078,12 @@ if IS_JYTHON:
             table_scroll = JScrollPane(self.table)
             table_scroll.setColumnHeaderView(self.table.getTableHeader())
             result_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT, table_scroll, evidence)
-            result_pane.setResizeWeight(0.4)
+            result_pane.setResizeWeight(0.58)
             settings_scroll = JScrollPane(settings)
-            settings_scroll.setPreferredSize(Dimension(420, 680))
+            settings_scroll.setPreferredSize(Dimension(360, 680))
             main = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, settings_scroll, result_pane)
             main.setResizeWeight(0.0)
-            main.setDividerLocation(440)
+            main.setDividerLocation(375)
             self.panel.add(main, BorderLayout.CENTER)
             self.controls = [self.target_box, self.meaning_box, self.alternatives, self.validation,
                              self.ignored, self.interval, self.writes, self.generate_button,
@@ -1105,7 +1107,10 @@ if IS_JYTHON:
             if getattr(self, "generating", False):
                 return
             self.prepared = None
+            self.attack = None
+            self.preview_rows = []
             self.start.setEnabled(False)
+            self.repeat.setEnabled(False) if hasattr(self, "repeat") else None
 
         def _target_changed(self):
             if self.loading_request:
@@ -1140,6 +1145,7 @@ if IS_JYTHON:
             self.new_header_value.setText("")
             self.preview.setText("")
             self.save.setEnabled(False)
+            self.repeat.setEnabled(False)
             self.source.setText("Envie uma requisi\u00e7\u00e3o pelo menu de contexto do Burp.")
             self.run_state.setText("Nenhuma execucao realizada.")
             self.progress_state.setText("Progresso: aguardando.")
@@ -1331,15 +1337,23 @@ if IS_JYTHON:
                     lines.append("Codec detectado: %s. Assinaturas n\u00e3o s\u00e3o recalculadas." % field.codec)
                 self.preview.setText("\n".join(lines))
                 self.preview.setCaretPosition(0)
-                self.prepared = (execution_raw, self.service, tests, requests, ignored, int(self.interval.getValue()))
-                self.details.setText("Pr\u00e9via pronta. Executar enviar\u00e1 somente esta rodada.")
+                # PreparedAttack is the authoritative immutable execution plan.
+                self.prepared = None
+                self.details.setText("Ataque preparado. Revise as linhas e clique em Iniciar.")
                 self.generating = False
-                self.start.setEnabled(True)
+                self.start.setEnabled(self.attack is not None and bool(self.attack.results))
+                self.repeat.setEnabled(False)
             except Exception as exc:
                 self.generating = False
                 self.prepared = None
                 self.start.setEnabled(False)
                 self._error(as_text(exc))
+
+        def _repeat(self):
+            if self.running or self.attack is None:
+                return
+            self.start.setEnabled(True)
+            self._execute()
 
         def _pause(self):
             if not self.running:
@@ -1369,10 +1383,16 @@ if IS_JYTHON:
         def _execute(self):
             if self.running:
                 return
-            if self.prepared is None:
-                self._error("A previa nao esta mais valida. Gere a previa novamente antes de executar.")
+            if self.attack is None or not self.attack.results:
+                self._error("Nenhum ataque preparado. Clique em Preparar testes primeiro.")
                 return
-            prepared = self.prepared
+            config = self.attack.config
+            raw = self.attack.execution_raw
+            service = self.service
+            tests = config.tests
+            requests = config.requests
+            ignored = config.ignored
+            delay = config.delay_ms
             self.running = True
             self.stopped.clear()
             self.paused.clear()
@@ -1398,7 +1418,6 @@ if IS_JYTHON:
             self.base_response_editor.setMessage(None, False)
             self.run_state.setText("Execucao em andamento; resultados provisorios ate o baseline final.")
             self.progress_state.setText("Progresso: iniciando rodada.")
-            raw, service, tests, requests, ignored, delay = prepared
             def progress(current, total, label):
                 on_ui(lambda: self._set_progress(current, total, label))
 
@@ -1499,6 +1518,7 @@ if IS_JYTHON:
             self.pause.setEnabled(False)
             self.pause.setText("Pausar")
             self.paused.clear()
+            self.repeat.setEnabled(self.attack is not None)
             for index, result in enumerate(self.preview_rows):
                 if result.response is None:
                     result.state = "CANCELADO" if self.stopped.is_set() else "NAO EXECUTADO"
