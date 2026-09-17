@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Semantic Intruder for Burp Suite: Python 2.7/Jython, dependency-free.
+"""Semantic Intruder V2 for Burp Suite: Python 2.7/Jython, dependency-free.
 
 Load this file as a Python extension. The pure core also runs on CPython 3
 for tests; the Burp interface requires Jython and Burp's Extender API.
@@ -26,14 +26,14 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
 MEANINGS = ("Identificador", "Texto", "N\u00famero", "Booleano")
 IDENTIFIER, TEXT, NUMBER, BOOLEAN = MEANINGS
 JSON_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
-WS = " \\t\\r\\n"
+WS = " \t\r\n"
 
 # Runtime detection kept deliberately conservative for old/new Burp releases
 # that still expose the legacy Extender API through Jython.
@@ -911,7 +911,6 @@ if IS_JYTHON:
             self.original = None
             self.service = None
             self.targets = []
-            self.prepared = None
             self.runner = None
             self.rows = []
             self.preview_rows = []
@@ -1021,7 +1020,7 @@ if IS_JYTHON:
             info = JLabel("Ate 50 testes + 3 referencias | 1 request por vez | exige Target Scope | Parar aguarda o request atual")
             info.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0))
             settings.add(info)
-            self.generate_button = self._button("4. Preparar testes", self._generate)
+            self.generate_button = self._button("Visualizar previa (opcional)", self._generate)
             settings.add(self.generate_button)
             self.preview = JTextArea(6, 28)
             self.preview.setEditable(False)
@@ -1030,7 +1029,7 @@ if IS_JYTHON:
             self._field(settings, "Attack summary / avisos", JScrollPane(self.preview), grow=True)
             for component in settings.getComponents():
                 component.setAlignmentX(0.0)
-            self.start = self._button("5. Iniciar", self._execute)
+            self.start = self._button("Iniciar", self._execute)
             self.pause = self._button("Pausar", self._pause)
             self.stop = self._button("Parar", self._stop)
             self.repeat = self._button("Repetir", self._repeat)
@@ -1045,7 +1044,7 @@ if IS_JYTHON:
             for button in (self.start, self.pause, self.stop, self.repeat, self.save, self.clear):
                 actions.add(button)
             self.run_state = JLabel("Ataque nao iniciado.")
-            self.progress_state = JLabel("Estado: aguardando preparacao.")
+            self.progress_state = JLabel("Estado: aguardando requisicao.")
             self.details = JLabel("Importe uma requisicao para comecar.")
             footer = JPanel(BorderLayout())
             messages = JPanel(GridLayout(0, 1))
@@ -1103,14 +1102,22 @@ if IS_JYTHON:
         def _error(self, message):
             JOptionPane.showMessageDialog(self.panel, as_text(message), "Semantic V2 Python", JOptionPane.INFORMATION_MESSAGE)
 
+        def _sync_start(self):
+            ready = (not self.running and not self.loading_request and
+                     self.original is not None and self.service is not None and
+                     0 <= self.target_box.getSelectedIndex() < len(self.targets))
+            self.start.setEnabled(ready)
+            self.repeat.setEnabled(ready and self.attack is not None)
+
         def _invalidate(self):
-            if getattr(self, "generating", False):
+            if getattr(self, "generating", False) or self.running:
                 return
-            self.prepared = None
             self.attack = None
             self.preview_rows = []
-            self.start.setEnabled(False)
-            self.repeat.setEnabled(False) if hasattr(self, "repeat") else None
+            self.rows = []
+            self.model.setRowCount(0)
+            self.save.setEnabled(False)
+            self._sync_start()
 
         def _target_changed(self):
             if self.loading_request:
@@ -1137,6 +1144,7 @@ if IS_JYTHON:
                 self.target_box.removeAllItems()
             finally:
                 self.loading_request = was_loading
+            self._sync_start()
             self.alternatives.setText("")
             self.ignored.setText("")
             self.writes.setSelected(False)
@@ -1197,7 +1205,8 @@ if IS_JYTHON:
                 stage = "preparar interface"
                 self.loading_request = True
                 try:
-                    self.prepared = None
+                    self.attack = None
+                    self.preview_rows = []
                     self.original = request
                     self.service = service
                     self.runner = None
@@ -1250,7 +1259,7 @@ if IS_JYTHON:
 
                 self._invalidate()
                 self.details.setText(
-                    "Requisicao importada com sucesso. Escolha o campo e gere a previa."
+                    "Requisicao importada com sucesso. Escolha o campo, configure os payloads e clique em Iniciar."
                 )
                 self.callbacks.printOutput(
                     "Semantic V2 Python %s: requisicao importada com sucesso (%d campos)." %
@@ -1338,15 +1347,16 @@ if IS_JYTHON:
                 self.preview.setText("\n".join(lines))
                 self.preview.setCaretPosition(0)
                 # PreparedAttack is the authoritative immutable execution plan.
-                self.prepared = None
                 self.details.setText("Ataque preparado. Revise as linhas e clique em Iniciar.")
                 self.generating = False
-                self.start.setEnabled(self.attack is not None and bool(self.attack.results))
+                self._sync_start()
                 self.repeat.setEnabled(False)
             except Exception as exc:
                 self.generating = False
-                self.prepared = None
-                self.start.setEnabled(False)
+                self.attack = None
+                self.preview_rows = []
+                self.model.setRowCount(0)
+                self._sync_start()
                 self._error(as_text(exc))
 
         def _repeat(self):
@@ -1384,8 +1394,9 @@ if IS_JYTHON:
             if self.running:
                 return
             if self.attack is None or not self.attack.results:
-                self._error("Nenhum ataque preparado. Clique em Preparar testes primeiro.")
-                return
+                self._generate()
+                if self.attack is None or not self.attack.results:
+                    return
             config = self.attack.config
             raw = self.attack.execution_raw
             service = self.service
@@ -1394,6 +1405,7 @@ if IS_JYTHON:
             ignored = config.ignored
             delay = config.delay_ms
             self.running = True
+            self.repeat.setEnabled(False)
             self.stopped.clear()
             self.paused.clear()
             self.pause.setText("Pausar")
@@ -1510,10 +1522,7 @@ if IS_JYTHON:
             self.stop.setEnabled(False)
             self.save.setEnabled(bool(runner.rows))
 
-            # Keep the exact generated preview available for an explicit re-run.
-            # Previously _invalidate() cleared self.prepared here, leaving
-            # "Executar previa" disabled after Stop/completion.
-            self.start.setEnabled(self.prepared is not None)
+            self._sync_start()
 
             self.pause.setEnabled(False)
             self.pause.setText("Pausar")
