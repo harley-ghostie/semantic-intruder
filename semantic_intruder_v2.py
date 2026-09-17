@@ -26,7 +26,7 @@ except NameError:
     text_type = str
     integer_types = (int,)
 
-VERSION = "0.3.8-previewstatefix"
+VERSION = "0.4.0"
 MAX_REQUEST = 1000000
 MAX_RESPONSE = 2000000
 MAX_TESTS = 50
@@ -636,6 +636,54 @@ class Response(object):
         self.milliseconds = 0
 
 
+class AttackConfiguration(object):
+    def __init__(self, base_request, target, semantic_type, tests, requests,
+                 ignored=(), extra_header=None, delay_ms=500):
+        self.base_request = base_request
+        self.target = target
+        self.semantic_type = semantic_type
+        self.tests = list(tests)
+        self.requests = list(requests)
+        self.ignored = list(ignored)
+        self.extra_header = extra_header
+        self.delay_ms = delay_ms
+
+class AttackResult(object):
+    def __init__(self, sequence, kind, label, payload, request):
+        self.sequence, self.kind, self.label = sequence, kind, label
+        self.payload, self.request = payload, request
+        self.response = None
+        self.state = "PENDENTE"
+        self.http_status = self.response_bytes = self.delta_bytes = self.elapsed_ms = ""
+        self.body_relation = ""
+        self.reflected = False
+        self.analysis = ""
+        self.changed_json_pointers = []
+
+class PreparedAttack(object):
+    def __init__(self, config, execution_raw):
+        self.config, self.execution_raw = config, execution_raw
+        self.results = [AttackResult(0, "BASELINE", "Baseline 1", "original", execution_raw),
+                        AttackResult(1, "BASELINE", "Baseline 2", "original", execution_raw)]
+        for index, (test, raw) in enumerate(zip(config.tests, config.requests), 1):
+            kind = "AUTORIZACAO" if test.authorization else "VALIDACAO"
+            self.results.append(AttackResult(index + 1, kind, "%d. %s" % (index, test.name),
+                                             value_text(test.value), raw))
+        self.results.append(AttackResult(len(self.results), "BASELINE", "Baseline final",
+                                         "original", execution_raw))
+        self.baseline_bytes = None
+
+    def reset_results(self):
+        self.baseline_bytes = None
+        for result in self.results:
+            result.response = None
+            result.state = "PENDENTE"
+            result.http_status = result.response_bytes = result.delta_bytes = result.elapsed_ms = ""
+            result.body_relation = result.analysis = ""
+            result.reflected = False
+            result.changed_json_pointers = []
+
+
 class RunStopped(Exception):
     pass
 
@@ -648,12 +696,13 @@ def monotonic():
 
 
 class Runner(object):
-    def __init__(self, transport, in_scope, stopped, emit, delay_ms=500, progress=None):
+    def __init__(self, transport, in_scope, stopped, emit, delay_ms=500, progress=None, paused=None):
         if not 0 <= delay_ms <= 10000:
             raise ValidationError("Intervalo invalido.")
         self.transport, self.in_scope, self.stopped, self.emit = transport, in_scope, stopped, emit
         self.progress = progress or (lambda current, total, label: None)
         self.delay = delay_ms / 1000.0
+        self.paused = paused
         self.last_finished = None
         self.rows = []
         self.outcome = "Execucao nao iniciada."
@@ -672,6 +721,8 @@ class Runner(object):
             pass
 
     def _send(self, raw):
+        while self.paused is not None and self.paused.is_set() and not self.stopped.is_set():
+            self.stopped.wait(0.05)
         if self.last_finished is not None:
             remaining = self.delay - (monotonic() - self.last_finished)
             while remaining > 0 and not self.stopped.is_set():
@@ -855,6 +906,8 @@ if IS_JYTHON:
             self.loading_request = False
             self.unloaded = False
             self.stopped = threading.Event()
+            self.paused = threading.Event()
+            self.attack = None
             self.original = None
             self.service = None
             self.targets = []
@@ -968,7 +1021,7 @@ if IS_JYTHON:
             info = JLabel("Ate 50 testes + 3 referencias | 1 request por vez | exige Target Scope | Parar aguarda o request atual")
             info.setBorder(BorderFactory.createEmptyBorder(8, 0, 8, 0))
             settings.add(info)
-            self.generate_button = self._button("4. Gerar pr\u00e9via", self._generate)
+            self.generate_button = self._button("4. Preparar testes", self._generate)
             settings.add(self.generate_button)
             self.preview = JTextArea(10, 30)
             self.preview.setEditable(False)
@@ -977,15 +1030,17 @@ if IS_JYTHON:
             self._field(settings, "Pr\u00e9via / avisos", JScrollPane(self.preview), grow=True)
             for component in settings.getComponents():
                 component.setAlignmentX(0.0)
-            self.start = self._button("5. Executar pr\u00e9via", self._execute)
+            self.start = self._button("5. Iniciar", self._execute)
+            self.pause = self._button("Pausar", self._pause)
             self.stop = self._button("Parar", self._stop)
             self.save = self._button("Exportar metadados JSON", self._export)
             self.clear = self._button("Limpar", self._clear)
             self.start.setEnabled(False)
+            self.pause.setEnabled(False)
             self.stop.setEnabled(False)
             self.save.setEnabled(False)
             actions = JPanel(FlowLayout(FlowLayout.LEFT))
-            for button in (self.start, self.stop, self.save, self.clear):
+            for button in (self.start, self.pause, self.stop, self.save, self.clear):
                 actions.add(button)
             self.run_state = JLabel("Nenhuma execucao realizada.")
             self.progress_state = JLabel("Progresso: aguardando.")
@@ -998,11 +1053,11 @@ if IS_JYTHON:
             footer.add(actions, BorderLayout.NORTH)
             footer.add(messages, BorderLayout.SOUTH)
             self.panel.add(footer, BorderLayout.SOUTH)
-            self.model = ReadOnlyModel(["Teste", "Valor", "HTTP", "Bytes", "ms", "An\u00e1lise"], 0)
+            self.model = ReadOnlyModel(["#", "Tipo", "Teste", "Payload", "Estado", "HTTP", "Bytes", "Delta", "ms", "Body", "Refletido", "Triagem"], 0)
             self.table = JTable(self.model)
             self.table.setRowHeight(22)
             self.table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN)
-            for index, width in enumerate((220, 100, 50, 70, 60, 430)):
+            for index, width in enumerate((35, 90, 190, 120, 95, 50, 65, 60, 55, 85, 70, 260)):
                 self.table.getColumnModel().getColumn(index).setPreferredWidth(width)
             self.table.setAutoCreateRowSorter(True)
             self.table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
@@ -1069,6 +1124,7 @@ if IS_JYTHON:
             self.original, self.service, self.runner = None, None, None
             self.rows, self.targets = [], []
             self.preview_rows = []
+            self.attack = None
             self.model.setRowCount(0)
             was_loading = self.loading_request
             self.loading_request = True
@@ -1246,21 +1302,18 @@ if IS_JYTHON:
                 for raw in requests:
                     if not self._in_scope(raw, self.service):
                         raise ValidationError("Uma muta\u00e7\u00e3o sai do Target scope. Revise o campo, a pr\u00e9via pretendida e o escopo do endpoint.")
-                planned = [
-                    {"test":"Baseline 1","payload":"original","request":execution_raw,"response":None,"analysis":"PENDENTE","changed_json_pointers":[]},
-                    {"test":"Baseline 2","payload":"original","request":execution_raw,"response":None,"analysis":"PENDENTE","changed_json_pointers":[]}
-                ]
-                for pi, (ptest, praw) in enumerate(zip(tests, requests), 1):
-                    planned.append({"test":"%d. %s" % (pi, ptest.name),
-                                    "payload":value_text(ptest.value),"request":praw,"response":None,
-                                    "analysis":"PENDENTE","changed_json_pointers":[]})
-                planned.append({"test":"Baseline final","payload":"original","request":execution_raw,
-                                "response":None,"analysis":"PENDENTE","changed_json_pointers":[]})
-                self.preview_rows = planned
+                config = AttackConfiguration(self.original, field,
+                                             as_text(self.meaning_box.getSelectedItem()),
+                                             tests, requests, ignored,
+                                             (header_name, header_value) if add_header else None,
+                                             int(self.interval.getValue()))
+                self.attack = PreparedAttack(config, execution_raw)
+                self.preview_rows = self.attack.results
                 self.model.setRowCount(0)
-                for prow in planned:
-                    self.model.addRow([prow["test"], prow["payload"], "", "", "", "PENDENTE"])
-                if planned:
+                for result in self.attack.results:
+                    self.model.addRow([result.sequence, result.kind, result.label, result.payload,
+                                       result.state, "", "", "", "", "", "", ""])
+                if self.attack.results:
                     self.table.setRowSelectionInterval(0, 0)
                     self._select_row()
 
@@ -1288,6 +1341,18 @@ if IS_JYTHON:
                 self.start.setEnabled(False)
                 self._error(as_text(exc))
 
+        def _pause(self):
+            if not self.running:
+                return
+            if self.paused.is_set():
+                self.paused.clear()
+                self.pause.setText("Pausar")
+                self.run_state.setText("Execucao retomada.")
+            else:
+                self.paused.set()
+                self.pause.setText("Continuar")
+                self.run_state.setText("Execucao pausada entre requests.")
+
         def _stop(self):
             if not self.running:
                 return
@@ -1310,20 +1375,22 @@ if IS_JYTHON:
             prepared = self.prepared
             self.running = True
             self.stopped.clear()
+            self.paused.clear()
+            self.pause.setText("Pausar")
             self.start.setEnabled(False)
+            self.pause.setEnabled(True)
             self.stop.setEnabled(True)
             self.save.setEnabled(False)
             self.clear.setEnabled(False)
             for control in self.controls:
                 control.setEnabled(False)
             self.rows = []
-            for pi, prow in enumerate(self.preview_rows):
-                prow["response"] = None
-                prow["analysis"] = "PENDENTE"
-                prow["changed_json_pointers"] = []
-                for col in (2, 3, 4):
+            if self.attack is not None:
+                self.attack.reset_results()
+            for pi, result in enumerate(self.preview_rows):
+                self.model.setValueAt("PENDENTE", pi, 4)
+                for col in range(5, 12):
                     self.model.setValueAt("", pi, col)
-                self.model.setValueAt("PENDENTE", pi, 5)
             self.current_controller.request_data = self.current_controller.response_data = None
             self.base_controller.response_data = None
             self.request_editor.setMessage(None, True)
@@ -1338,7 +1405,7 @@ if IS_JYTHON:
             runner = Runner(lambda data: self._transport(data, service),
                             lambda data: self._in_scope(data, service), self.stopped,
                             lambda row: on_ui(lambda: self._append(row)), delay,
-                            progress=progress)
+                            progress=progress, paused=self.paused)
             self.runner = runner
 
             def work():
@@ -1361,16 +1428,14 @@ if IS_JYTHON:
                 return
             index = current - 1
             if 0 <= index < len(self.preview_rows):
-                self.preview_rows[index]["analysis"] = "EXECUTANDO..."
-                self.model.setValueAt("EXECUTANDO...", index, 5)
+                result = self.preview_rows[index]
+                result.state = "EXECUTANDO"
+                self.model.setValueAt("EXECUTANDO", index, 4)
                 self.table.setRowSelectionInterval(index, index)
                 self._select_row()
-            self.progress_state.setText(
-                "Progresso: %d/%d - %s" % (current, total, ui_text(label))
-            )
-            self.progress_state.setToolTipText(
-                "A chamada HTTP atual usa os timeouts configurados no Burp."
-            )
+            self.progress_state.setText("Progresso: %d/%d - %s" %
+                                        (current, total, ui_text(label)))
+            self.progress_state.setToolTipText("A chamada HTTP atual usa os timeouts configurados no Burp.")
 
         def _append(self, row):
             if self.unloaded:
@@ -1379,14 +1444,33 @@ if IS_JYTHON:
             index = len(self.rows) - 1
             if index >= len(self.preview_rows):
                 return
-            prow = self.preview_rows[index]
-            prow.update(row)
-            self.model.setValueAt(row["test"], index, 0)
-            self.model.setValueAt(row["payload"], index, 1)
-            self.model.setValueAt(row["http_status"], index, 2)
-            self.model.setValueAt(row["response_bytes"], index, 3)
-            self.model.setValueAt(row["elapsed_ms"], index, 4)
-            self.model.setValueAt(row["analysis"], index, 5)
+            result = self.preview_rows[index]
+            result.request, result.response = row["request"], row["response"]
+            result.state = "CONCLUIDO"
+            result.http_status = row["http_status"]
+            result.response_bytes = row["response_bytes"]
+            result.elapsed_ms = row["elapsed_ms"]
+            result.analysis = row["analysis"]
+            result.changed_json_pointers = row["changed_json_pointers"]
+            if index == 0:
+                result.delta_bytes = 0
+                if self.attack is not None:
+                    self.attack.baseline_bytes = row["response_bytes"]
+            elif self.attack is not None and self.attack.baseline_bytes is not None:
+                result.delta_bytes = row["response_bytes"] - self.attack.baseline_bytes
+            result.body_relation = "IGUAL" if "Corpo igual" in row["analysis"] else "DIFERENTE"
+            try:
+                parsed = Response(row["request"], row["response"])
+                marker = as_text(result.payload).encode("utf-8")
+                result.reflected = bool(result.kind != "BASELINE" and marker and marker in parsed.body)
+            except Exception:
+                result.reflected = False
+            values = [result.sequence, result.kind, result.label, result.payload, result.state,
+                      result.http_status, result.response_bytes, result.delta_bytes,
+                      result.elapsed_ms, result.body_relation,
+                      "SIM" if result.reflected else "NAO", result.analysis]
+            for col, value in enumerate(values):
+                self.model.setValueAt(value, index, col)
             if index == 0:
                 self.base_controller.request_data = self._to_java(row["request"])
                 self.base_controller.response_data = self._to_java(row["response"])
@@ -1412,13 +1496,13 @@ if IS_JYTHON:
             # "Executar previa" disabled after Stop/completion.
             self.start.setEnabled(self.prepared is not None)
 
-            for index, row in enumerate(self.rows):
-                self.model.setValueAt(row["analysis"], index, 5)
-            for index in range(len(self.rows), len(self.preview_rows)):
-                state = "CANCELADO / NAO EXECUTADO" if self.stopped.is_set() else "NAO EXECUTADO"
-                self.preview_rows[index]["analysis"] = state
-                self.model.setValueAt(state, index, 5)
-
+            self.pause.setEnabled(False)
+            self.pause.setText("Pausar")
+            self.paused.clear()
+            for index, result in enumerate(self.preview_rows):
+                if result.response is None:
+                    result.state = "CANCELADO" if self.stopped.is_set() else "NAO EXECUTADO"
+                    self.model.setValueAt(result.state, index, 4)
             self.run_state.setText(runner.outcome)
             self.run_state.setToolTipText(runner.outcome)
 
@@ -1446,18 +1530,19 @@ if IS_JYTHON:
             index = self.table.convertRowIndexToModel(index)
             if index >= len(self.preview_rows):
                 return
-            row = self.preview_rows[index]
+            result = self.preview_rows[index]
             self.current_controller.service = self.service
-            self.current_controller.request_data = self._to_java(row.get("request"))
-            self.current_controller.response_data = self._to_java(row.get("response"))
+            self.current_controller.request_data = self._to_java(result.request)
+            self.current_controller.response_data = self._to_java(result.response)
             self.request_editor.setMessage(self.current_controller.request_data, True)
             self.response_editor.setMessage(self.current_controller.response_data, False)
-            detail = row.get("analysis", "PENDENTE")
-            changes = row.get("changed_json_pointers", [])
-            if changes:
-                detail += " | Diferencas: " + ", ".join(changes)
-            if row.get("response") is None:
-                detail += " | Request pronta; response ainda nao recebida."
+            detail = result.state
+            if result.analysis:
+                detail += " | " + result.analysis
+            if result.changed_json_pointers:
+                detail += " | Diferencas: " + ", ".join(result.changed_json_pointers)
+            if result.response is None:
+                detail += " | Request preparada; response ainda nao recebida."
             self.details.setText(detail)
             self.details.setToolTipText(detail)
 
